@@ -3,11 +3,12 @@
 //  AltTab
 //
 //  The Cmd+Tab override + session input. Two inputs:
-//    (a) Carbon RegisterEventHotKey for Cmd+Tab / Cmd+Shift+Tab — the initial trigger AND every cycle
-//        while Cmd stays held (re-fires on each Tab press; needs no Accessibility permission itself).
-//    (b) A CGEventTap (background run-loop thread) watching .flagsChanged (Cmd RELEASE = commit) and
-//        .keyDown (Esc = cancel, absorbed while a session is active). Handling Esc in the tap — rather
-//        than an NSEvent local monitor — works reliably even though our panel is non-activating.
+//    (a) Carbon RegisterEventHotKey for Cmd+Tab — the initial trigger AND every forward cycle while Cmd
+//        stays held (re-fires on each Tab press; needs no Accessibility permission itself).
+//    (b) A CGEventTap (background run-loop thread) watching .flagsChanged (Cmd RELEASE = commit; while a
+//        session is up, a Shift DOWN-edge = step backward one) and .keyDown (Esc = cancel, absorbed while
+//        a session is active). Handling Esc in the tap — rather than an NSEvent local monitor — works
+//        reliably even though our panel is non-activating.
 //
 
 import Cocoa
@@ -19,13 +20,13 @@ import os
 protocol SwitcherSessionControlling: AnyObject {
     var isActive: Bool { get }
     func summonOrCycleForward()   // Cmd+Tab: first press summons (index 1 preselected), again cycles next
-    func cycleBackward()          // Cmd+Shift+Tab
+    func cycleBackward()          // Cmd+Shift: Shift tapped while the session is up → step back one
     func commit()                 // Cmd released → focus highlighted tile
     func cancel()                 // Esc
 }
 
 // MARK: - Carbon hotkey IDs.
-private enum HotkeyID: UInt32 { case next = 1, previous = 2 }
+private enum HotkeyID: UInt32 { case next = 1 }
 private let kSignature: OSType = 0x416C_5462 // 'AlTb'
 
 // MARK: - Background run-loop thread hosting the CGEventTap.
@@ -84,28 +85,19 @@ final class HotkeyManager {
         NativeCmdTab.disable()
     }
 
-    // MARK: - (a) Carbon hotkeys.
+    // MARK: - (a) Carbon hotkey: Cmd+Tab (forward).
     // kEventHotKeyNoOptions lets the hotkey re-fire on each Tab press while Cmd stays held, so the
-    // same hotkey drives both summon and cycle.
+    // single hotkey drives both summon and forward cycling. (Backward is Cmd+Shift, handled in the tap.)
     private func installCarbonHotkeys() {
         let target = GetEventDispatcherTarget() // works without Accessibility
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: OSType(kEventHotKeyPressed))
-        let handler: EventHandlerUPP = { _, eventRef, _ -> OSStatus in
-            var hkID = EventHotKeyID()
-            GetEventParameter(eventRef, EventParamName(kEventParamDirectObject),
-                              EventParamType(typeEventHotKeyID), nil,
-                              MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-            let which = hkID.id
-            Task { @MainActor in
-                guard let s = HotkeyManager.shared.session else { return }
-                if which == HotkeyID.previous.rawValue { s.cycleBackward() } else { s.summonOrCycleForward() }
-            }
+        let handler: EventHandlerUPP = { _, _, _ -> OSStatus in
+            Task { @MainActor in HotkeyManager.shared.session?.summonOrCycleForward() }
             return noErr
         }
         InstallEventHandler(target, handler, 1, &spec, nil, &hotKeyHandler)
         register(.next, keyCode: UInt32(kVK_Tab), mods: UInt32(cmdKey), target: target)
-        register(.previous, keyCode: UInt32(kVK_Tab), mods: UInt32(cmdKey | shiftKey), target: target)
     }
 
     private func register(_ id: HotkeyID, keyCode: UInt32, mods: UInt32, target: EventTargetRef?) {
@@ -121,11 +113,25 @@ final class HotkeyManager {
         let callback: CGEventTapCallBack = { _, type, event, _ in
             switch type {
             case .flagsChanged:
-                // Never absorb modifier events — the previously-focused app must still see Cmd-up.
-                if !event.flags.contains(.maskCommand) {
+                // Never absorb modifier events — the previously-focused app must still see them.
+                let flags = event.flags
+                if !flags.contains(.maskCommand) {
+                    // Cmd released → commit the highlighted tile.
                     Task { @MainActor in
                         guard let s = HotkeyManager.shared.session, s.isActive else { return }
                         s.commit()
+                    }
+                } else if HotkeyManager.shared.sessionActive, flags.contains(.maskShift) {
+                    // Cmd still held + Shift now present. Gate on the keycode so ONLY the Shift key's own
+                    // transition fires this (not another modifier changing while Shift happens to be held),
+                    // which — together with flagsChanged having no key-repeat — makes each physical Shift
+                    // tap step back exactly one. Cmd+Shift replaces the old Cmd+Shift+Tab.
+                    let kc = event.getIntegerValueField(.keyboardEventKeycode)
+                    if kc == Int64(kVK_Shift) || kc == Int64(kVK_RightShift) {
+                        Task { @MainActor in
+                            guard let s = HotkeyManager.shared.session, s.isActive else { return }
+                            s.cycleBackward()
+                        }
                     }
                 }
             case .keyDown:

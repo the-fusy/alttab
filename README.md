@@ -19,8 +19,8 @@ See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full rationale and every de
   (app icon + window title), sorted by **most recently used**.
 - A quick tap-and-release flips straight to the **previous window** — the panel doesn't
   even appear.
-- Hold **Cmd** and press **Tab** to cycle forward, **Cmd+Shift+Tab** to cycle back,
-  **Esc** to cancel, release **Cmd** to switch. Mouse hover selects; click switches;
+- Hold **Cmd** and press **Tab** to cycle forward, tap **Shift** (i.e. **Cmd+Shift**) to
+  step back, **Esc** to cancel, release **Cmd** to switch. Click a tile to switch;
   the ✕ on a tile closes that window.
 
 ## What it intentionally does *not* do
