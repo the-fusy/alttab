@@ -18,6 +18,8 @@ dist/
 *.provisionprofile
 notarize.env
 secrets.env
+# Local, machine-specific signing identity name read by build.sh (personal cert — keep out of the repo)
+.signing-identity
 
 # build.sh output
 build/

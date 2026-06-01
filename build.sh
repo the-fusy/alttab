@@ -8,17 +8,23 @@ APP_NAME="AltTab"
 BUNDLE_ID="dev.fusy.alttab"
 APP="build/${APP_NAME}.app"
 
-# Signing identity. Default ad-hoc ("-") for local dev / CI without a cert.
-# For a stable dev grant use a self-signed identity name (see PERMISSION PERSISTENCE note),
-# e.g.  SIGN_IDENTITY="AltTab Dev" ./build.sh
-# For release:  SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh
+# Signing identity. Precedence: env var > local .signing-identity file (gitignored) > ad-hoc "-".
+# Pin a STABLE identity so the macOS Accessibility/TCC grant survives rebuilds — ad-hoc "-" changes the
+# code hash every build and DROPS the grant (you'd have to re-grant Accessibility each time). Pin it via:
+#   echo 'Apple Development: Your Name (TEAMID)' > .signing-identity
+# or per-build:  SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./build.sh
+# For release:   SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh
+if [[ -z "${SIGN_IDENTITY:-}" && -f .signing-identity ]]; then
+  SIGN_IDENTITY="$(tr -d '\r\n' < .signing-identity)"
+fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
-# --timestamp is required for notarization but slow/needs network. Ad-hoc dev skips it.
-if [[ "$SIGN_IDENTITY" == "-" ]]; then
-  TIMESTAMP_FLAG="--timestamp=none"
-else
+# A secure (network) timestamp is only needed for a notarized Developer ID *release*. Ad-hoc and local
+# dev identities (Apple Development, self-signed) skip it — faster and works offline.
+if [[ "$SIGN_IDENTITY" == Developer\ ID* ]]; then
   TIMESTAMP_FLAG="--timestamp"
+else
+  TIMESTAMP_FLAG="--timestamp=none"
 fi
 
 echo "==> swift build -c release"
