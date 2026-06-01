@@ -14,6 +14,11 @@
     <string>AltTab</string>
     <key>CFBundleExecutable</key>
     <string>AltTab</string>
+    <!-- Loose .icns (Resources/AltTab.icns), copied into Contents/Resources by build.sh. The value is
+         the base name without the .icns extension. Shows in Finder / About / the Accessibility &
+         Login-Items lists (no Dock tile — this is an LSUIElement agent). -->
+    <key>CFBundleIconFile</key>
+    <string>AltTab</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
