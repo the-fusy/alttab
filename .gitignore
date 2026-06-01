@@ -1,0 +1,23 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Build output
+DerivedData/
+*.app
+*.dSYM/
+dist/
+
+# macOS
+.DS_Store
+
+# Signing secrets — never commit
+*.p12
+*.cer
+*.provisionprofile
+notarize.env
+secrets.env
+
+# build.sh output
+build/

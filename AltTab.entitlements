@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Developer ID app, not App Store: no sandbox. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <!-- Required under hardened runtime to dlopen SkyLight (a non-Apple-signed-into-our-
+         bundle private framework). Without this the hardened-runtime process aborts on
+         first SkyLight call. Verified by running the signed binary. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

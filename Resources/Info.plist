@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle identity. Keep CFBundleIdentifier STABLE forever: TCC keys the
+         Accessibility grant on (bundle id + code-signing identity).
+         Distinct from the real AltTab (com.lwouis.alt-tab-macos) so the two never
+         collide in the Accessibility/TCC list. -->
+    <key>CFBundleIdentifier</key>
+    <string>dev.fusy.alttab</string>
+    <key>CFBundleName</key>
+    <string>AltTab</string>
+    <key>CFBundleDisplayName</key>
+    <string>AltTab</string>
+    <key>CFBundleExecutable</key>
+    <string>AltTab</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <!-- Versioning. Bump these per release (build.sh can sed them, or edit by hand). -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Launch behavior, read by LaunchServices before the process starts. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Agent app: no Dock tile, no menu bar takeover. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT licence</string>
+
+    <!-- NSPrincipalClass intentionally OMITTED: AltTab uses the default
+         NSApplication and sets .accessory activation policy in code. -->
+</dict>
+</plist>
