@@ -98,6 +98,15 @@ is linked (`otool -L`); `Info.plist` is embedded; the binary **launches and runs
 without crashing (direct exec). *Not yet interactively tested* — that needs the user
 to grant Accessibility and exercise Cmd+Tab.
 
+**Re-verified on macOS 26.4.1 / Swift 6.3.1 / Xcode toolchain** (target `arm64-apple-macosx26.0`):
+compiles release with **0 warnings**; bundles + ad-hoc-signs; SkyLight linked and `Info.plist`
+embedded. All five private symbols (`CGSSetSymbolicHotKeyEnabled`, `_AXUIElementGetWindow`,
+`GetProcessForPID`, `_SLPSSetFrontProcessWithOptions`, `SLPSPostEventRecordTo`) confirmed
+**resolvable at runtime via `dlsym`** in the macOS 26 dyld shared cache — so the SLPS focus path
+and the native-Cmd+Tab toggle still bind. Interactively **runs** on macOS 26 (user-confirmed). The
+binary is now produced solely against the macOS 26.4 SDK (`minos` 13.0); the 13/14/15 back-deploy
+floor has **not** been re-validated on this toolchain (prior validation was macOS 14.5 / Swift 6.0.3).
+
 > Note: `open AltTab.app` from an automated/Background launchd session fails with
 > launchd error 125 ("Domain does not support specified action") because that session
 > can't reach the GUI launch domain. Launching from Finder or a normal Terminal
@@ -140,3 +149,35 @@ Every non-trivial decision goes in this file (and the matching tables above are 
 current). Keep entries short and state the *why*, not just the *what*. This file is
 the single source of truth for project intent; the code is the source of truth for
 behavior.
+
+---
+
+## 9. Post-first-run changes (after interactive testing on macOS 26)
+
+After the first real run, the following were decided and applied:
+
+- **Switcher look → native macOS Cmd+Tab style** (revises P2's *presentation*, not its
+  per-window model). One centered, wrapping row of **app icons only**, a soft neutral
+  rounded **halo** on the selected icon (the saturated-blue full-tile fill read as
+  "Linux/generic"), and a single **title label beneath the row** showing only the
+  *selected* window's title. Tiles still map 1:1 to windows; the title label is how
+  same-app windows are told apart. The panel is now **clamped to the screen's visible
+  frame** (top-anchored when there are more windows than fit) so rows can't render
+  off-screen — closes the unbounded-vertical-overflow bug.
+- **Close (✕) surfaces a blocking save dialog.** Pressing a tile's ✕ presses the AX
+  close button, then polls briefly for an `AXSheet` (the "Save changes?" / "Close all
+  tabs?" / running-process dialogs). If one appears, the panel steps aside and the
+  window is fronted via `Focus.focus` so the user actually sees and answers the dialog,
+  instead of it being stranded in the background with the tile already gone.
+- **App icon added** (`Resources/AltTab.icns`, wired via `CFBundleIconFile`): a blue
+  squircle with two overlapping window cards, drawn programmatically (CoreGraphics) at
+  all sizes — no asset catalog, no external tooling. The menu-bar item keeps its
+  monochrome SF Symbol (template images are the correct menu-bar convention).
+- **Correctness fixes from the pre-run adversarial review** (all verified): MRU is now
+  bumped optimistically on commit (fixes a stale-snapshot wrong-flip on rapid double-tap);
+  `sessionActive` is lock-guarded across the event-tap thread; the window-destroyed event
+  is routed through the serial AXQueue (ordering); per-app window order is preserved
+  (ordered dedupe + front-most-highest stamping) instead of randomized by `Set`;
+  `userFocusObserved` only latches once a focus event is actually applied; a missed
+  destroy identity-match forces an un-throttled per-app reconcile; the Launch-at-Login
+  toggle reflects real `SMAppService` status and surfaces `.requiresApproval`.
