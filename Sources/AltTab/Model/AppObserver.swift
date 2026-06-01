@@ -71,10 +71,14 @@ final class AppObserver {
 
         switch type {
         case kAXUIElementDestroyedNotification:
-            // `element` is the destroyed window (stale). Match it by identity on the main thread;
-            // this avoids the full reconcile that a failed windowId() would otherwise force on
-            // every single window close.
-            DispatchQueue.main.async { WindowStore.shared.removeWindow(matching: element) }
+            // `element` is the destroyed window (stale). Route through the SAME serial AXQueue as the
+            // created/title/focus reads (no IPC needed here — the bounce only enforces ordering) so OS
+            // delivery order is preserved on the way to main; otherwise a `created` read still queued on
+            // AXQueue could land AFTER this destroy and resurrect the window. Match by identity on main;
+            // this avoids the full reconcile that a failed windowId() would otherwise force per close.
+            AXQueue.shared.async {
+                DispatchQueue.main.async { WindowStore.shared.removeWindow(matching: element) }
+            }
 
         case kAXWindowCreatedNotification:
             AXQueue.shared.async {

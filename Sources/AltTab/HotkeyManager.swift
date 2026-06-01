@@ -12,6 +12,7 @@
 
 import Cocoa
 import Carbon.HIToolbox
+import os
 
 // MARK: - Session interface (implemented by SwitcherController; @MainActor).
 @MainActor
@@ -57,8 +58,14 @@ final class HotkeyManager {
     weak var session: SwitcherSessionControlling?
 
     /// Nonisolated mirror of session.isActive, so the event-tap callback can decide synchronously
-    /// (on its background thread) whether to absorb Esc. The controller keeps this in sync.
-    var sessionActive = false
+    /// (on its background thread) whether to absorb Esc. Lock-guarded because it is WRITTEN on the main
+    /// thread (SwitcherController.begin/end) and READ on the CGEventTap's background thread: a plain Bool
+    /// would be a data race (no happens-before edge, and the compiler could hoist/cache the read).
+    private let _sessionActive = OSAllocatedUnfairLock<Bool>(initialState: false)
+    var sessionActive: Bool {
+        get { _sessionActive.withLock { $0 } }
+        set { _sessionActive.withLock { $0 = newValue } }
+    }
 
     private static var eventTap: CFMachPort?
     private let tapThread = RunLoopThread(name: "dev.fusy.alttab.inputEvents")

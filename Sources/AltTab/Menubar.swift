@@ -44,13 +44,19 @@ final class Menubar {
         do {
             if SMAppService.mainApp.status == .enabled {
                 try SMAppService.mainApp.unregister()
-                sender.state = .off
             } else {
                 try SMAppService.mainApp.register()
-                sender.state = .on
             }
         } catch {
             NSLog("AltTab: login-item toggle failed: \(error)")
+        }
+        // Reflect the ACTUAL post-toggle status, not an optimistic guess. On macOS 13+ register() can
+        // succeed into .requiresApproval (the user must enable it under System Settings ▸ General ▸ Login
+        // Items) rather than .enabled — show no checkmark then, and open that pane so the ask is visible.
+        let status = SMAppService.mainApp.status
+        sender.state = (status == .enabled) ? .on : .off
+        if status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
         }
     }
 

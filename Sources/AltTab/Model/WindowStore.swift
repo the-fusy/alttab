@@ -120,8 +120,10 @@ final class WindowStore: NSObject {
 
     /// Called when a window gains focus (from AppObserver or app activation). Main thread.
     func noteFocused(wid: CGWindowID) {
-        userFocusObserved = true
         guard let w = byWindowId[wid] else { return }
+        // Only retire cold-start z-order seeding once a focus event is actually APPLIED to a tracked
+        // window — early focus events for not-yet-enumerated windows must not suppress seeding.
+        userFocusObserved = true
         mruCounter &+= 1
         w.mruStamp = mruCounter
     }
@@ -200,7 +202,9 @@ final class WindowStore: NSObject {
         let liveWids = Set(live.map { $0.0 })
         let dead = windows.filter { $0.pid == pid && !liveWids.contains($0.cgWindowId) }
         if !dead.isEmpty { removeWindows(dead) }
-        for (wid, el, attrs) in live {
+        // `live` is front-to-back (kAXWindows order). Stamp NEW windows back-to-front so the front-most
+        // window gets the highest stamp ⇒ sorts to index 0 — matching seedZOrder's z-order convention.
+        for (wid, el, attrs) in live.reversed() {
             if let existing = byWindowId[wid] {
                 if let t = attrs.title, !t.isEmpty { existing.title = t }
             } else {
@@ -237,8 +241,15 @@ final class WindowStore: NSObject {
     /// Remove a window identified by its (possibly already-destroyed) AX element. Matching by element
     /// identity avoids the full reconcile that a failed windowId() lookup would otherwise force.
     func removeWindow(matching element: AXUIElement) {
-        if let w = windows.first(where: { CFEqual($0.axElement, element) }) { removeWindows([w]) }
-        else { reconcileAllApps() }
+        if let w = windows.first(where: { CFEqual($0.axElement, element) }) {
+            removeWindows([w])
+        } else {
+            // Identity match missed (the element changed under us). Force an UN-throttled per-app sweep so
+            // the dead window can't linger just because a summon reconcile ran <0.25s earlier.
+            var pid: pid_t = 0
+            AXUIElementGetPid(element, &pid)
+            if pid > 0 { reconcileApp(pid: pid) } else { reconcileAllApps() }
+        }
     }
 
     func removeWindow(wid: CGWindowID) {

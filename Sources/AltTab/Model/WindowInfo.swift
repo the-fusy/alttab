@@ -45,17 +45,67 @@ final class WindowInfo {
     /// Title shown in the tile. AX title → app name (never empty).
     var displayTitle: String { title.isEmpty ? appName : title }
 
-    /// Press the window's close button (the tile's ✕). Runs off-main.
-    /// Mirrors alt-tab Window.close() (Window.swift:163-189) minus the fullscreen special-case.
-    func close() {
+    /// Outcome of pressing the window's close button.
+    enum CloseOutcome {
+        case closed          // the window went away (or had no close button) — safe to drop the tile
+        case needsAttention  // a confirmation dialog (e.g. "Save changes?") is now blocking the close
+    }
+
+    /// Press the window's close button (the tile's ✕), then report whether the window actually closed
+    /// or a confirmation sheet popped up. Runs off-main; `completion` is delivered on the MAIN thread.
+    /// Mirrors alt-tab Window.close() (Window.swift:163-189) minus the fullscreen special-case, plus a
+    /// sheet-detection poll: a "Do you want to save?" dialog must be surfaced, not silently stranded.
+    func close(completion: @escaping (CloseOutcome) -> Void) {
         AXQueue.shared.async { [axElement] in
             var closeButton: CFTypeRef?
             let err = AXUIElementCopyAttributeValue(axElement, kAXCloseButtonAttribute as CFString, &closeButton)
-            if err == .success, let button = closeButton, CFGetTypeID(button) == AXUIElementGetTypeID() {
-                // swiftlint:disable:next force_cast
-                AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            guard err == .success, let button = closeButton, CFGetTypeID(button) == AXUIElementGetTypeID() else {
+                DispatchQueue.main.async { completion(.closed) } // nothing to press ⇒ treat as gone
+                return
             }
+            // swiftlint:disable:next force_cast
+            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            WindowInfo.pollAfterClose(axElement, attempt: 0, completion: completion)
         }
+    }
+
+    /// After pressing close, the app either destroys the window or attaches a modal sheet (unsaved
+    /// changes, "close all tabs?", a running-process warning, …). Poll a few times for that sheet; if it
+    /// appears the close is blocked and the caller should surface the window. Runs on the AXQueue,
+    /// delaying between attempts via a main hop so it never busy-blocks the serial queue.
+    private static func pollAfterClose(_ window: AXUIElement, attempt: Int,
+                                       completion: @escaping (CloseOutcome) -> Void) {
+        let maxAttempts = 6
+        // Window element gone ⇒ it really closed.
+        var role: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .invalidUIElement {
+            DispatchQueue.main.async { completion(.closed) }
+            return
+        }
+        if hasBlockingSheet(window) {
+            DispatchQueue.main.async { completion(.needsAttention) }
+            return
+        }
+        guard attempt < maxAttempts else {
+            DispatchQueue.main.async { completion(.closed) } // no sheet appeared ⇒ assume closed/closing
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) {
+            AXQueue.shared.async { pollAfterClose(window, attempt: attempt + 1, completion: completion) }
+        }
+    }
+
+    /// True if the window currently hosts a modal sheet — the AX role macOS gives "Save changes?" et al.
+    private static func hasBlockingSheet(_ window: AXUIElement) -> Bool {
+        var children: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &children) == .success,
+              let kids = children as? [AXUIElement] else { return false }
+        for kid in kids {
+            var r: CFTypeRef?
+            if AXUIElementCopyAttributeValue(kid, kAXRoleAttribute as CFString, &r) == .success,
+               (r as? String) == (kAXSheetRole as String) { return true }
+        }
+        return false
     }
 }
 

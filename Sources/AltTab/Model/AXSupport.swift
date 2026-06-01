@@ -67,8 +67,11 @@ extension AXUIElement {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(self, kAXWindowsAttribute as CFString, &value) == .success,
               let arr = value as? [AXUIElement] else { return [] }
-        // macOS sometimes returns duplicate elements (e.g. Mail at login); dedupe.
-        return Array(Set(arr))
+        // macOS sometimes returns duplicate elements (e.g. Mail at login); dedupe while PRESERVING the
+        // kAXWindows front-to-back order. `Array(Set:)` would randomize it, scrambling the per-app MRU
+        // seeding so "previous window" (index 1) became arbitrary for any multi-window app.
+        var seen = Set<AXUIElement>()
+        return arr.filter { seen.insert($0).inserted }
     }
 }
 

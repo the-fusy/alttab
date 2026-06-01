@@ -50,6 +50,10 @@ final class SwitcherController: SwitcherSessionControlling {
         let target = windows.indices.contains(selectedIndex) ? windows[selectedIndex] : nil
         end()
         if let target {
+            // Optimistically make the chosen window MRU index 0 NOW, on the main thread, so a fast second
+            // Cmd+Tab sees the new order immediately instead of racing the async AX activation notification
+            // (which can lag tens of ms or be coalesced away, breaking the A→B→A "previous window" flip).
+            WindowStore.shared.noteFocused(wid: target.cgWindowId)
             Focus.focus(.init(axWindow: target.axElement, pid: target.pid, cgWindowId: target.cgWindowId))
         }
     }
@@ -126,11 +130,23 @@ final class SwitcherController: SwitcherSessionControlling {
 
     private func closeTile(_ idx: Int) {
         guard active, windows.indices.contains(idx) else { return }
-        windows[idx].close()
+        let target = windows[idx]
+        // Optimistic UI: drop the tile immediately so the panel stays snappy.
         windows.remove(at: idx)
-        if windows.isEmpty { cancel(); return }
-        if selectedIndex >= windows.count { selectedIndex = windows.count - 1 }
-        panel.rebuild(windows: windows, selected: selectedIndex) // re-lay-out without re-centering
+        if windows.isEmpty {
+            cancel()
+        } else {
+            if selectedIndex >= windows.count { selectedIndex = windows.count - 1 }
+            panel.rebuild(windows: windows, selected: selectedIndex) // re-lay-out without re-centering
+        }
+        // Press close; if a confirmation dialog ("Save changes?") blocks it, step out of the way and
+        // bring that dialog to the front so the user can actually answer it (it would otherwise be
+        // stranded behind everything, with the tile already gone).
+        target.close { [weak self] outcome in
+            guard case .needsAttention = outcome else { return }
+            if let self, self.active { self.end() } // hide our panel before fronting the dialog
+            Focus.focus(.init(axWindow: target.axElement, pid: target.pid, cgWindowId: target.cgWindowId))
+        }
     }
 
     // MARK: - Stuck-panel fallback: if a Cmd-up flagsChanged was dropped, poll the hardware modifier.
