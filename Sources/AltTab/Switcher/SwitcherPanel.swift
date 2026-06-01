@@ -32,12 +32,15 @@ final class SwitcherPanel: NSPanel {
         animationBehavior = .none
         isMovable = false
         setAccessibilitySubrole(.unknown) // keep our own window out of any future capture/list
+        // Dark vibrant appearance so the title label / close-button semantic colors resolve light on the
+        // dark HUD blur (matches the native Cmd+Tab switcher).
+        appearance = NSAppearance(named: .vibrantDark)
 
         effectView.material = .hudWindow
         effectView.blendingMode = .behindWindow
         effectView.state = .active
         effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 14
+        effectView.layer?.cornerRadius = 18
         effectView.layer?.masksToBounds = true
         contentView = effectView
 
@@ -52,13 +55,12 @@ final class SwitcherPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func show(windows: [WindowInfo], selected: Int) {
-        let screen = Self.targetScreen()
-        let maxWidth = screen.visibleFrame.width * 0.92
-        let size = grid.build(windows: windows, selected: selected, maxWidth: maxWidth)
+        let vf = Self.targetScreen().visibleFrame
+        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92, maxHeight: vf.height * 0.9)
         grid.frame = NSRect(origin: NSPoint(x: outerInset, y: outerInset), size: size)
         setContentSize(size)
-        let vf = screen.visibleFrame
-        setFrameOrigin(NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2))
+        let centered = NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2)
+        setFrameOrigin(clamp(centered, size: size, in: vf))
         alphaValue = 1
         makeKeyAndOrderFront(nil)
     }
@@ -66,13 +68,24 @@ final class SwitcherPanel: NSPanel {
     /// Re-lay-out an already-visible panel (e.g. after closing a tile) WITHOUT re-centering, so tiles
     /// don't jump under the cursor. Keeps the top edge and horizontal center fixed.
     func rebuild(windows: [WindowInfo], selected: Int) {
+        let vf = Self.targetScreen().visibleFrame
         let anchorCenterX = frame.midX
         let anchorTop = frame.maxY
-        let maxWidth = Self.targetScreen().visibleFrame.width * 0.92
-        let size = grid.build(windows: windows, selected: selected, maxWidth: maxWidth)
+        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92, maxHeight: vf.height * 0.9)
         grid.frame = NSRect(origin: NSPoint(x: outerInset, y: outerInset), size: size)
         setContentSize(size)
-        setFrameOrigin(NSPoint(x: anchorCenterX - size.width / 2, y: anchorTop - size.height))
+        let anchored = NSPoint(x: anchorCenterX - size.width / 2, y: anchorTop - size.height)
+        setFrameOrigin(clamp(anchored, size: size, in: vf))
+    }
+
+    /// Keep the whole panel inside the screen's usable area. If it is taller than the screen (a great
+    /// many windows), anchor its TOP so the first rows — including the pre-selected previous window —
+    /// stay visible rather than centering it half-off both edges.
+    private func clamp(_ origin: NSPoint, size: NSSize, in vf: NSRect) -> NSPoint {
+        var o = origin
+        o.x = (size.width <= vf.width) ? max(vf.minX, min(o.x, vf.maxX - size.width)) : vf.minX
+        o.y = (size.height <= vf.height) ? max(vf.minY, min(o.y, vf.maxY - size.height)) : vf.maxY - size.height
+        return o
     }
 
     func select(_ index: Int) { grid.select(index) }

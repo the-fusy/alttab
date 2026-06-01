@@ -2,17 +2,21 @@
 //  TileView.swift
 //  AltTab
 //
-//  One cell: app icon on top, window title below, a ✕ close button shown on hover, and a rounded
-//  selection highlight. Plain AppKit views — fine for the handful of tiles a fast switcher shows.
+//  One cell in the native-style switcher: just the app icon, a soft rounded selection halo behind the
+//  selected one, and a ✕ close button shown on hover. The icon size is chosen ADAPTIVELY by SwitcherView
+//  (bigger when few windows, smaller when many) and passed in. The window title is NOT drawn here — the
+//  row's single title label (SwitcherView) shows the selected window's title, exactly like macOS Cmd+Tab.
 //
 
 import Cocoa
 
 final class TileView: NSView {
-    static let width: CGFloat = 150
-    static let height: CGFloat = 124
+    /// Single source of truth for cell geometry, shared with SwitcherView's layout math.
+    static func inset(for iconSize: CGFloat) -> CGFloat { (iconSize * 0.16).rounded() }
+    static func cell(for iconSize: CGFloat) -> CGFloat { iconSize + inset(for: iconSize) * 2 }
 
     let index: Int
+    private let iconSize: CGFloat
     var onHover: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
@@ -20,44 +24,33 @@ final class TileView: NSView {
     var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
 
     private let iconView = NSImageView()
-    private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
     private var tracking: NSTrackingArea?
 
-    private static let iconSize: CGFloat = 64
-
-    init(index: Int, window: WindowInfo) {
+    init(index: Int, window: WindowInfo, iconSize: CGFloat) {
         self.index = index
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        self.iconSize = iconSize
+        let inset = Self.inset(for: iconSize)
+        let cell = iconSize + inset * 2
+        super.init(frame: NSRect(x: 0, y: 0, width: cell, height: cell))
         wantsLayer = true
 
-        // Icon (top, centered).
-        let s = Self.iconSize
+        // Icon, centered in the cell.
         iconView.imageScaling = .scaleProportionallyUpOrDown
         if let cg = window.icon {
-            iconView.image = NSImage(cgImage: cg, size: NSSize(width: s, height: s))
+            iconView.image = NSImage(cgImage: cg, size: NSSize(width: iconSize, height: iconSize))
         }
-        iconView.frame = NSRect(x: (Self.width - s) / 2, y: 16, width: s, height: s)
+        iconView.frame = NSRect(x: inset, y: inset, width: iconSize, height: iconSize)
         addSubview(iconView)
 
-        // Title (below icon, up to 2 truncated lines).
-        titleField.stringValue = window.displayTitle
-        titleField.alignment = .center
-        titleField.font = .systemFont(ofSize: 11)
-        titleField.textColor = .labelColor
-        titleField.lineBreakMode = .byTruncatingTail
-        titleField.maximumNumberOfLines = 2
-        titleField.cell?.truncatesLastVisibleLine = true
-        titleField.frame = NSRect(x: 6, y: 16 + s + 6, width: Self.width - 12, height: 34)
-        addSubview(titleField)
-
-        // Close button (hover-only, top-left).
+        // Close button (hover-only, top-left corner of the cell; flipped coords ⇒ small y = top).
         closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close window")
         closeButton.imagePosition = .imageOnly
         closeButton.isBordered = false
         closeButton.bezelStyle = .regularSquare
         closeButton.contentTintColor = .secondaryLabelColor
-        closeButton.frame = NSRect(x: 7, y: 7, width: 20, height: 20)
+        let cb: CGFloat = 22
+        closeButton.frame = NSRect(x: 5, y: 5, width: cb, height: cb)
         closeButton.target = self
         closeButton.action = #selector(closeClicked)
         closeButton.isHidden = true
@@ -71,9 +64,12 @@ final class TileView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected else { return }
-        let r = bounds.insetBy(dx: 3, dy: 3)
-        let path = NSBezierPath(roundedRect: r, xRadius: 10, yRadius: 10)
-        NSColor.selectedContentBackgroundColor.withAlphaComponent(0.9).setFill()
+        // Soft, neutral rounded halo (NOT a saturated blue) — the macOS Cmd+Tab selection look.
+        let pad = Self.inset(for: iconSize) * 0.45
+        let r = bounds.insetBy(dx: pad, dy: pad)
+        let radius = iconSize * 0.2
+        let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
+        NSColor.white.withAlphaComponent(0.22).setFill()
         path.fill()
     }
 
