@@ -28,7 +28,6 @@ final class SwitcherController: SwitcherSessionControlling {
     private let displayDelay: TimeInterval = 0.1
 
     private init() {
-        panel.onHover = { [weak self] in self?.mouseSelect($0) }
         panel.onClick = { [weak self] in self?.mouseCommit($0) }
         panel.onClose = { [weak self] in self?.closeTile($0) }
     }
@@ -116,12 +115,7 @@ final class SwitcherController: SwitcherSessionControlling {
 
     // MARK: - Mouse
 
-    private func mouseSelect(_ idx: Int) {
-        guard active, windows.indices.contains(idx) else { return }
-        selectedIndex = idx
-        panel.select(idx)
-    }
-
+    // A tile is selected only by an EXPLICIT click — hovering no longer moves the selection.
     private func mouseCommit(_ idx: Int) {
         guard active, windows.indices.contains(idx) else { return }
         selectedIndex = idx

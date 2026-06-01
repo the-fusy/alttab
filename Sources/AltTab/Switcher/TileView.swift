@@ -17,7 +17,6 @@ final class TileView: NSView {
 
     let index: Int
     private let iconSize: CGFloat
-    var onHover: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
 
@@ -86,7 +85,8 @@ final class TileView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        onHover?(index)
+        // Hover only reveals the close affordance — it does NOT change the selection. Selection moves
+        // only via the keyboard (Cmd+Tab) or an explicit click on a tile.
         closeButton.isHidden = false
     }
 

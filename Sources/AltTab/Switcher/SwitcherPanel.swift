@@ -10,7 +10,6 @@
 import Cocoa
 
 final class SwitcherPanel: NSPanel {
-    var onHover: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
 
@@ -44,7 +43,6 @@ final class SwitcherPanel: NSPanel {
         effectView.layer?.masksToBounds = true
         contentView = effectView
 
-        grid.onHover = { [weak self] in self?.onHover?($0) }
         grid.onClick = { [weak self] in self?.onClick?($0) }
         grid.onClose = { [weak self] in self?.onClose?($0) }
         effectView.addSubview(grid)

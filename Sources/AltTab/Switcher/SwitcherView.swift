@@ -12,7 +12,6 @@
 import Cocoa
 
 final class SwitcherView: NSView {
-    var onHover: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
 
@@ -80,7 +79,6 @@ final class SwitcherView: NSView {
                                 y: vMargin + CGFloat(row) * (cell + spacing),
                                 width: cell, height: cell)
             tile.isSelected = (i == selected)
-            tile.onHover = { [weak self] in self?.onHover?($0) }
             tile.onClick = { [weak self] in self?.onClick?($0) }
             tile.onClose = { [weak self] in self?.onClose?($0) }
             addSubview(tile)
