@@ -35,7 +35,10 @@ final class AppObserver {
 
     func setUp() {
         var obs: AXObserver?
-        guard AXObserverCreate(pid, Self.callback, &obs) == .success, let obs else { return }
+        guard AXObserverCreate(pid, Self.callback, &obs) == .success, let obs else {
+            Log.store.error("AXObserverCreate failed for pid \(self.pid, privacy: .public) — app's windows won't be tracked live")
+            return
+        }
         self.observer = obs
         AXQueue.shared.async { [appElement] in
             for name in Self.notifications {

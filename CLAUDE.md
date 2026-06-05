@@ -37,12 +37,24 @@ Accessibility (the whole stack is gated behind it). Checklist:
    probe via `CGSIsSymbolicHotKeyEnabled`/`SLSIsSymbolicHotKeyEnabled` (1 = native ON / AltTab not
    overriding; 0 = AltTab active).
 
+## Debugging / logs
+
+The app logs to **unified logging**, subsystem `dev.fusy.alttab` (`Log.swift`; categories: app,
+hotkeys, session, store, focus). Default/error-level events persist on disk — diagnose AFTER a repro:
+`./scripts/logs.sh 10m` dumps the last 10 min to a file; bare `./scripts/logs.sh` streams live
+(incl. debug-level, which is memory-only and absent from dumps). Crash reports (none so far) would
+land in `~/Library/Logs/DiagnosticReports/`. Key persisted events: per-summon window count
+("summon bailed" = store got gutted), reconcile drops in WindowStore (only when the WindowServer no
+longer lists the window — kAXWindows absence just means "other Space" and KEEPS it, debug-logged),
+event-tap disabled-by-OS, Focus fallbacks.
+
 ## Code map (quick)
 
 `HotkeyManager` (Carbon hotkey + CGEventTap, disables native Cmd+Tab) · `SwitcherController` (session state
 machine, fast-flip) · `Switcher/*` (native-style panel: one centered icon row + selected-title label;
 **single-row invariant** — `chooseIconSize` shrinks icons by *width* so all windows stay on ONE row, never
 wraps; assumes count ≤ what fits at `minIcon`) ·
-`Model/WindowStore` + `AppObserver` + `AXSupport` (AX-driven window model, per-window MRU; all AX IPC off
+`Model/WindowStore` + `AppObserver` + `AXSupport` (AX-driven window model, per-window MRU; windows stay
+tracked across Spaces — liveness via CGWindowList all-Spaces, NOT kAXWindows absence; all AX IPC off
 the main thread via the serial `AXQueue`, model mutated on main) · `Focus` + `PrivateAPIs` (SLPS focus path,
 the only private symbols). Swift 5 language mode on purpose (background run-loop threads for AX/event tap).

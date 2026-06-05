@@ -48,7 +48,7 @@ final class Menubar {
                 try SMAppService.mainApp.register()
             }
         } catch {
-            NSLog("AltTab: login-item toggle failed: \(error)")
+            Log.app.error("login-item toggle failed: \(String(describing: error), privacy: .public)")
         }
         // Reflect the ACTUAL post-toggle status, not an optimistic guess. On macOS 13+ register() can
         // succeed into .requiresApproval (the user must enable it under System Settings ▸ General ▸ Login

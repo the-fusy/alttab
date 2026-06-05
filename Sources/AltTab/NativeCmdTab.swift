@@ -20,6 +20,7 @@ enum NativeCmdTab {
     /// Call AFTER Accessibility is granted and AFTER our hotkeys are registered.
     static func disable() {
         for id in ids { CGSSetSymbolicHotKeyEnabled(id, false) }
+        Log.hotkeys.log("native Cmd+Tab disabled (symbolic hotkeys 1,2)")
     }
 
     /// Restore the native switcher. Runs on quit AND (best-effort) from crash/signal handlers.

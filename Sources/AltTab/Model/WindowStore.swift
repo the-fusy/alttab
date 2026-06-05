@@ -2,8 +2,11 @@
 //  WindowStore.swift
 //  AltTab
 //
-//  The live model of every visible standard window on the current Space, kept up to date by
+//  The live model of every standard window seen on ANY Space, kept up to date by
 //  NSWorkspace KVO (app launch/quit) + per-app AX observers, and ordered by per-window MRU.
+//  kAXWindows can only ENUMERATE current-Space windows, so a window seen once stays tracked when
+//  its Space goes to the background; liveness comes from the WindowServer (CGWindowList, all
+//  Spaces), NOT from kAXWindows absence — see applyReconcile.
 //
 //  Threading contract: this object is NOT actor-isolated, but EVERY method must be called on the
 //  MAIN THREAD. Background AX reads happen on the serial AXQueue and hop back via
@@ -169,6 +172,24 @@ final class WindowStore: NSObject {
         windows.sorted { $0.mruStamp != $1.mruStamp ? $0.mruStamp > $1.mruStamp : $0.cgWindowId < $1.cgWindowId }
     }
 
+    /// One CG existence snapshot shared by a whole reconcile sweep. Written, then read, ONLY on the
+    /// serial AXQueue (the snapshot block is enqueued before the per-app blocks), so no lock needed.
+    private final class ExistenceSnapshot { var wids: Set<CGWindowID>? }
+
+    /// Every window the WindowServer currently knows about, across ALL Spaces (minimized included).
+    /// The liveness oracle for reconcile: absence from kAXWindows only means "not on the current
+    /// Space"; absence from THIS set means the window is really gone. nil = the CG call failed.
+    private static func allWindowIds() -> Set<CGWindowID>? {
+        guard let infos = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else {
+            // Degraded mode: liveness unknown, this pass drops nothing. Stale windows can linger
+            // until the next successful snapshot (or an AX destroyed event) — keep it diagnosable.
+            Log.store.error("CGWindowListCopyWindowInfo failed — liveness unknown, dropping nothing this pass")
+            return nil
+        }
+        return Set(infos.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
+    }
+
     /// Re-enumerate tracked apps' current-Space windows (drop dead, add new) and pick up any
     /// newly-eligible app not yet tracked (e.g. one that transitioned to a UI policy after launch).
     /// Called on each summon; throttled so rapid summons don't stack fan-outs.
@@ -179,13 +200,17 @@ final class WindowStore: NSObject {
         for app in NSWorkspace.shared.runningApplications where isEligibleApp(app) && observers[app.processIdentifier] == nil {
             appLaunched(app)
         }
-        for (pid, _) in observers { reconcileApp(pid: pid) }
+        // ONE existence snapshot for the whole sweep — one WindowServer IPC instead of one per app.
+        let snapshot = ExistenceSnapshot()
+        AXQueue.shared.async { snapshot.wids = Self.allWindowIds() }
+        for (pid, _) in observers { reconcileApp(pid: pid, existence: snapshot) }
     }
 
-    private func reconcileApp(pid: pid_t) {
+    private func reconcileApp(pid: pid_t, existence: ExistenceSnapshot? = nil) {
         let appElement = AXUIElementCreateApplication(pid)
         let appName = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
         AXQueue.shared.async {
+            let existing = existence?.wids ?? Self.allWindowIds()
             let elements = appElement.currentSpaceWindows()
             var live: [(CGWindowID, AXUIElement, WindowAttrs)] = []
             for el in elements {
@@ -194,14 +219,30 @@ final class WindowStore: NSObject {
                 guard isEligibleWindow(attrs) else { continue }
                 live.append((wid, el, attrs))
             }
-            DispatchQueue.main.async { self.applyReconcile(pid: pid, live: live, appName: appName) }
+            DispatchQueue.main.async { self.applyReconcile(pid: pid, live: live, existing: existing, appName: appName) }
         }
     }
 
-    private func applyReconcile(pid: pid_t, live: [(CGWindowID, AXUIElement, WindowAttrs)], appName: String) {
+    private func applyReconcile(pid: pid_t, live: [(CGWindowID, AXUIElement, WindowAttrs)],
+                                existing: Set<CGWindowID>?, appName: String) {
+        // The app can quit between the AXQueue read and this main-thread apply; appQuit has already
+        // torn down its observer and removed its windows — adding `live` back would resurrect them.
+        guard observers[pid] != nil else { return }
         let liveWids = Set(live.map { $0.0 })
-        let dead = windows.filter { $0.pid == pid && !liveWids.contains($0.cgWindowId) }
-        if !dead.isEmpty { removeWindows(dead) }
+        // kAXWindows covers the CURRENT Space only, so "absent from it" is NOT "closed": windows on
+        // other Spaces (e.g. a fullscreen-video Space) must survive a reconcile run from elsewhere —
+        // dropping them used to gut the model and erase MRU history whenever a summon happened on
+        // another Space. A window is dead only when the WindowServer itself no longer lists it; with
+        // no existence info (CG failure) we drop nothing and rely on kAXUIElementDestroyed.
+        let absent = windows.filter { $0.pid == pid && !liveWids.contains($0.cgWindowId) }
+        let dead = absent.filter { existing?.contains($0.cgWindowId) == false }
+        if absent.count > dead.count {
+            Log.store.debug("reconcile \(appName, privacy: .public): keeping \(absent.count - dead.count) off-Space window(s)")
+        }
+        if !dead.isEmpty {
+            Log.store.log("reconcile \(appName, privacy: .public): dropping \(dead.count) window(s) gone from WindowServer: \(dead.map { "\($0.title)#\($0.cgWindowId)" }.joined(separator: " | "), privacy: .public)")
+            removeWindows(dead)
+        }
         // `live` is front-to-back (kAXWindows order). Stamp NEW windows back-to-front so the front-most
         // window gets the highest stamp ⇒ sorts to index 0 — matching seedZOrder's z-order convention.
         for (wid, el, attrs) in live.reversed() {
@@ -225,6 +266,7 @@ final class WindowStore: NSObject {
         guard isEligibleWindow(attrs), let wid = element.windowId(), wid != 0,
               byWindowId[wid] == nil else { return }
         let appName = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
+        Log.store.debug("AX created: \(appName, privacy: .public) – \(attrs.title ?? "", privacy: .public) [wid \(wid)]")
         mruCounter &+= 1
         let w = WindowInfo(cgWindowId: wid, pid: pid, axElement: element,
                            title: attrs.title ?? "", appName: appName,
@@ -242,6 +284,7 @@ final class WindowStore: NSObject {
     /// identity avoids the full reconcile that a failed windowId() lookup would otherwise force.
     func removeWindow(matching element: AXUIElement) {
         if let w = windows.first(where: { CFEqual($0.axElement, element) }) {
+            Log.store.debug("AX destroyed: \(w.appName, privacy: .public) – \(w.title, privacy: .public) [wid \(w.cgWindowId)]")
             removeWindows([w])
         } else {
             // Identity match missed (the element changed under us). Force an UN-throttled per-app sweep so

@@ -49,6 +49,7 @@ final class SwitcherController: SwitcherSessionControlling {
         let target = windows.indices.contains(selectedIndex) ? windows[selectedIndex] : nil
         end()
         if let target {
+            Log.session.log("commit → \(target.appName, privacy: .public) – \(target.title, privacy: .public) [wid \(target.cgWindowId)]")
             // Optimistically make the chosen window MRU index 0 NOW, on the main thread, so a fast second
             // Cmd+Tab sees the new order immediately instead of racing the async AX activation notification
             // (which can lag tens of ms or be coalesced away, breaking the A→B→A "previous window" flip).
@@ -67,7 +68,14 @@ final class SwitcherController: SwitcherSessionControlling {
     private func begin(forward: Bool) {
         windows = WindowStore.shared.sortedForDisplay()
         // Need at least two windows to switch between; one (or zero) → nothing to do, no panel.
-        guard windows.count > 1 else { windows = []; return }
+        guard windows.count > 1 else {
+            // KEY diagnostic: a summon that silently does nothing means the store got gutted
+            // (e.g. a reconcile from a fullscreen Space dropped every other-Space window).
+            Log.session.error("summon bailed: only \(self.windows.count) window(s) in store")
+            windows = []
+            return
+        }
+        Log.session.log("summon: \(self.windows.count) windows, forward=\(forward), top: \(self.windows.prefix(3).map { "\($0.appName)#\($0.cgWindowId)" }.joined(separator: ", "), privacy: .public)")
         active = true
         HotkeyManager.shared.sessionActive = true // lets the event tap absorb Esc while we're up
         panelShown = false

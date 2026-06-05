@@ -48,9 +48,15 @@ enum Focus {
     // itself from Hammerspoon issue #370.
 
     private static func focusViaSLPS(_ target: Target) {
-        guard target.cgWindowId != 0 else { focusPublic(target); return }
+        guard target.cgWindowId != 0 else {
+            Log.focus.error("no wid for pid \(target.pid, privacy: .public) — public-API fallback")
+            focusPublic(target); return
+        }
         var psn = ProcessSerialNumber()
-        guard GetProcessForPID(target.pid, &psn) == noErr else { focusPublic(target); return }
+        guard GetProcessForPID(target.pid, &psn) == noErr else {
+            Log.focus.error("GetProcessForPID failed for pid \(target.pid, privacy: .public) — public-API fallback")
+            focusPublic(target); return
+        }
         _SLPSSetFrontProcessWithOptions(&psn, target.cgWindowId, 0x200 /* userGenerated */)
         makeKeyWindow(&psn, target.cgWindowId)
         AXUIElementPerformAction(target.axWindow, kAXRaiseAction as CFString)

@@ -141,6 +141,9 @@ final class HotkeyManager {
                     return nil // absorb Esc so the foreground app doesn't also receive it
                 }
             case .tapDisabledByTimeout, .tapDisabledByUserInput:
+                // The OS silently kills the tap (callback too slow / secure input). Without it Cmd-release
+                // never commits — the #1 "switcher stopped working" cause, so always log the occurrence.
+                Log.hotkeys.error("event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input", privacy: .public) — re-enabling")
                 if let tap = HotkeyManager.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             default:
                 break
@@ -154,7 +157,7 @@ final class HotkeyManager {
                                           eventsOfInterest: mask,
                                           callback: callback,
                                           userInfo: nil) else {
-            NSLog("AltTab: failed to create event tap (Accessibility not granted?)")
+            Log.hotkeys.error("failed to create event tap (Accessibility not granted?)")
             return
         }
         HotkeyManager.eventTap = tap
@@ -165,12 +168,14 @@ final class HotkeyManager {
 
     // MARK: - Robustness.
     @objc private func onWake() {
+        Log.hotkeys.log("system wake — checking event tap")
         reEnableTapIfNeeded()
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.reEnableTapIfNeeded() }
     }
 
     func reEnableTapIfNeeded() {
         guard let tap = HotkeyManager.eventTap, !CGEvent.tapIsEnabled(tap: tap) else { return }
+        Log.hotkeys.error("event tap found disabled — re-enabling")
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
