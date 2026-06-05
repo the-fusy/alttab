@@ -2,11 +2,13 @@
 //  SwitcherView.swift
 //  AltTab
 //
-//  Native-style layout: a centered (wrapping) row of app-icon tiles plus ONE title label beneath that
+//  Native-style layout: a SINGLE centered row of app-icon tiles plus ONE title label beneath that
 //  shows the SELECTED window's title — like the macOS Cmd+Tab switcher. The icon size is chosen
 //  ADAPTIVELY: large (up to maxIcon) when few windows, stepping down toward minIcon when there are enough
-//  windows that the big size wouldn't fit the screen height. So 2 windows ⇒ big icons, compact panel;
-//  many windows ⇒ smaller icons that still fit. Manual layout, no Auto Layout / NSCollectionView.
+//  windows that the big size wouldn't fit one row WIDTHWISE. So 2 windows ⇒ big icons, compact panel;
+//  many windows ⇒ smaller icons that still fit one row. The design invariant is one row — we assume the
+//  window count never exceeds what fits at minIcon, so wrapping (in `build`) is only a defensive fallback.
+//  Manual layout, no Auto Layout / NSCollectionView.
 //
 
 import Cocoa
@@ -44,9 +46,10 @@ final class SwitcherView: NSView {
 
     override var isFlipped: Bool { true } // top-left origin, so rows fill downward
 
-    /// Build tiles in centered wrapping rows. Icon size adapts so the grid fits `maxWidth`×`maxHeight`.
+    /// Build tiles in centered wrapping rows. Icon size adapts so the grid fits a single row within
+    /// `maxWidth`; only an extreme window count wraps (see `chooseIconSize`).
     @discardableResult
-    func build(windows: [WindowInfo], selected: Int, maxWidth: CGFloat, maxHeight: CGFloat) -> NSSize {
+    func build(windows: [WindowInfo], selected: Int, maxWidth: CGFloat) -> NSSize {
         if titleLabel.superview == nil { addSubview(titleLabel) }
         tiles.forEach { $0.removeFromSuperview() }
         tiles = []
@@ -54,7 +57,7 @@ final class SwitcherView: NSView {
         self.selected = selected
 
         let count = max(windows.count, 1)
-        let iconSize = chooseIconSize(count: count, maxWidth: maxWidth, maxHeight: maxHeight)
+        let iconSize = chooseIconSize(count: count, maxWidth: maxWidth)
         let cell = TileView.cell(for: iconSize)
 
         let avail = max(maxWidth - hMargin * 2, cell)
@@ -93,19 +96,19 @@ final class SwitcherView: NSView {
         return NSSize(width: contentWidth, height: contentHeight)
     }
 
-    /// Largest icon size (maxIcon→minIcon) whose wrapped grid fits the height budget. Few windows keep
-    /// maxIcon (big); more windows step it down so everything still fits on screen.
-    private func chooseIconSize(count: Int, maxWidth: CGFloat, maxHeight: CGFloat) -> CGFloat {
-        let chrome = vMargin * 2 + titleGap + titleHeight
-        let availH = max(maxHeight - chrome, minIcon)
+    /// Largest icon size (maxIcon→minIcon) that keeps every tile on a SINGLE row. Few windows keep
+    /// maxIcon (big); more windows step it down so they still fit one row. Only when even minIcon can't
+    /// fit them all in one row do we fall back to minIcon and let `build` wrap into multiple rows.
+    /// Height is intentionally NOT a constraint here — wrapping is a width problem. In the extreme
+    /// many-window case a tall multi-row grid can exceed the screen; `SwitcherPanel.clamp()` then anchors
+    /// the panel's top edge so the first rows stay visible (it does not crop or scroll — pre-existing gap).
+    private func chooseIconSize(count: Int, maxWidth: CGFloat) -> CGFloat {
         var size = maxIcon
         while size > minIcon {
             let cell = TileView.cell(for: size)
             let avail = max(maxWidth - hMargin * 2, cell)
             let perRow = max(1, Int((avail + spacing) / (cell + spacing)))
-            let rows = Int(ceil(Double(count) / Double(perRow)))
-            let gridHeight = CGFloat(rows) * cell + CGFloat(rows - 1) * spacing
-            if gridHeight <= availH { break }
+            if perRow >= count { break } // everything fits one row at this size
             size -= iconStep
         }
         return size

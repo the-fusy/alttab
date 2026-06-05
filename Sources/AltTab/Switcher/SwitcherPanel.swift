@@ -54,7 +54,7 @@ final class SwitcherPanel: NSPanel {
 
     func show(windows: [WindowInfo], selected: Int) {
         let vf = Self.targetScreen().visibleFrame
-        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92, maxHeight: vf.height * 0.9)
+        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92)
         grid.frame = NSRect(origin: NSPoint(x: outerInset, y: outerInset), size: size)
         setContentSize(size)
         let centered = NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2)
@@ -69,7 +69,7 @@ final class SwitcherPanel: NSPanel {
         let vf = Self.targetScreen().visibleFrame
         let anchorCenterX = frame.midX
         let anchorTop = frame.maxY
-        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92, maxHeight: vf.height * 0.9)
+        let size = grid.build(windows: windows, selected: selected, maxWidth: vf.width * 0.92)
         grid.frame = NSRect(origin: NSPoint(x: outerInset, y: outerInset), size: size)
         setContentSize(size)
         let anchored = NSPoint(x: anchorCenterX - size.width / 2, y: anchorTop - size.height)

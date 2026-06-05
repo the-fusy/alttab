@@ -157,13 +157,22 @@ behavior.
 After the first real run, the following were decided and applied:
 
 - **Switcher look → native macOS Cmd+Tab style** (revises P2's *presentation*, not its
-  per-window model). One centered, wrapping row of **app icons only**, a soft neutral
+  per-window model). One centered row of **app icons only**, a soft neutral
   rounded **halo** on the selected icon (the saturated-blue full-tile fill read as
   "Linux/generic"), and a single **title label beneath the row** showing only the
   *selected* window's title. Tiles still map 1:1 to windows; the title label is how
-  same-app windows are told apart. The panel is now **clamped to the screen's visible
-  frame** (top-anchored when there are more windows than fit) so rows can't render
-  off-screen — closes the unbounded-vertical-overflow bug.
+  same-app windows are told apart.
+- **Single-row invariant — icons adaptively resize, they do NOT wrap.** The design intent
+  is that the switcher is **always one row**. `SwitcherView.chooseIconSize` shrinks the
+  icon (maxIcon 120 → minIcon 64, step 8) to the largest size at which **all** windows fit
+  one row within the width budget (`screen × 0.92`); it deliberately does **not** consider
+  height. The trigger for shrinking is "doesn't fit one row by **width**", never "doesn't
+  fit by height" — an earlier height-only criterion was the bug that let big icons wrap to a
+  second row instead of shrinking. **Assumption:** the window count never exceeds what fits
+  in one row at `minIcon` (≈18 on a 1080p display, more on wider screens), so in practice we
+  never wrap. Multi-row wrap in `build` + the **top-anchored `SwitcherPanel.clamp()`** is a
+  defensive fallback only (it repositions the panel; it does not crop or scroll — an accepted
+  gap for an unrealistic count).
 - **Close (✕) surfaces a blocking save dialog.** Pressing a tile's ✕ presses the AX
   close button, then polls briefly for an `AXSheet` (the "Save changes?" / "Close all
   tabs?" / running-process dialogs). If one appears, the panel steps aside and the
