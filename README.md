@@ -15,8 +15,9 @@ See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full rationale and every de
 
 - **Cmd+Tab** opens the switcher (it replaces the native Cmd+Tab while running, and
   restores it on quit/crash).
-- Lists every visible standard window on the **current Space**, one tile per window
-  (app icon + window title), sorted by **most recently used**.
+- Lists your standard windows, one tile per window (app icon + window title), sorted by
+  **most recently used**. Windows on other Spaces appear once you've visited their Space;
+  switching to one moves you there.
 - A quick tap-and-release flips straight to the **previous window** — the panel doesn't
   even appear.
 - Hold **Cmd** and press **Tab** to cycle forward, tap **Shift** (i.e. **Cmd+Shift**) to
@@ -25,9 +26,8 @@ See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full rationale and every de
 
 ## What it intentionally does *not* do
 
-No window thumbnails, no Screen Recording permission, no other-Spaces/minimized/hidden
-windows, no Dock dependency, no settings window, no auto-updater, no licensing. Just the
-switcher.
+No window thumbnails, no Screen Recording permission, no minimized/hidden windows, no Dock
+dependency, no settings window, no auto-updater, no licensing. Just the switcher.
 
 ## Requirements
 

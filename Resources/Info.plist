@@ -41,7 +41,7 @@
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>NSHumanReadableCopyright</key>
-    <string>MIT licence</string>
+    <string>© 2026 Nikita Sukhorukov · MIT License</string>
 
     <!-- NSPrincipalClass intentionally OMITTED: AltTab uses the default
          NSApplication and sets .accessory activation policy in code. -->

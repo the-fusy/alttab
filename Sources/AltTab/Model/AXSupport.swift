@@ -31,7 +31,7 @@ final class AXRunLoopThread: Thread, @unchecked Sendable {
 
     func startAndWait() {
         guard runLoop == nil else { return }
-        name = "com.wintab.axEvents"
+        name = "dev.fusy.alttab.axEvents"
         qualityOfService = .userInteractive
         start()
         ready.wait()
