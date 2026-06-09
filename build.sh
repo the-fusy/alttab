@@ -19,9 +19,9 @@ if [[ -z "${SIGN_IDENTITY:-}" && -f .signing-identity ]]; then
 fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
-# A secure (network) timestamp is only needed for a notarized Developer ID *release*. Ad-hoc and local
-# dev identities (Apple Development, self-signed) skip it — faster and works offline.
-if [[ "$SIGN_IDENTITY" == Developer\ ID* ]]; then
+# A secure (network) timestamp is only needed for a notarized release (RELEASE=1). Plain local builds
+# skip it — faster, works offline, and it doesn't affect the signing identity / TCC requirement.
+if [[ "${RELEASE:-0}" == "1" ]]; then
   TIMESTAMP_FLAG="--timestamp"
 else
   TIMESTAMP_FLAG="--timestamp=none"
@@ -53,11 +53,11 @@ codesign --verify --strict --verbose=2 "$APP"
 echo "Built and signed: $APP"
 
 # ---------------------------------------------------------------------------
-# RELEASE: notarize + staple. Runs automatically when signing with a Developer ID
-# identity; produces build/AltTab.zip ready to attach to a GitHub Release. Set
-# NOTARIZE=0 to skip (e.g. a quick local Developer ID test build).
-#
-# One-time credential setup (stored in the login keychain, not in the repo):
+# RELEASE (RELEASE=1): notarize + staple the app, then build a notarized DMG below.
+# Plain `./build.sh` is a fast local build (sign only, no network) — same Developer ID
+# identity as releases, so the same TCC designated requirement, so the Accessibility
+# grant is shared and survives rebuilds (no duplicate entries). Notarization needs a
+# Developer ID identity and a stored notarytool credential profile (login keychain):
 #   xcrun notarytool store-credentials AltTabNotary \
 #     --apple-id "you@example.com" --team-id TEAMID --password APP_SPECIFIC_PASSWORD
 # Override the profile name with NOTARY_PROFILE=... if you used a different one.
@@ -65,7 +65,10 @@ echo "Built and signed: $APP"
 NOTARY_PROFILE="${NOTARY_PROFILE:-AltTabNotary}"
 ZIP="build/${APP_NAME}.zip"
 
-if [[ "$SIGN_IDENTITY" == Developer\ ID* && "${NOTARIZE:-1}" != "0" ]]; then
+if [[ "${RELEASE:-0}" == "1" ]]; then
+  if [[ "$SIGN_IDENTITY" != Developer\ ID* ]]; then
+    echo "RELEASE=1 needs a Developer ID identity, got: $SIGN_IDENTITY" >&2; exit 1
+  fi
   echo "==> Notarize (profile: $NOTARY_PROFILE) — this uploads to Apple and waits"
   ditto -c -k --keepParent "$APP" "$ZIP"
   xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -76,20 +79,20 @@ if [[ "$SIGN_IDENTITY" == Developer\ ID* && "${NOTARIZE:-1}" != "0" ]]; then
   spctl --assess --type execute -vvv "$APP" || true
   echo "Notarized + stapled + zipped for distribution: $ZIP"
 else
-  echo "(skipped notarization: not a Developer ID identity, or NOTARIZE=0)"
+  echo "(local build — sign only; use RELEASE=1 for a notarized DMG release)"
 fi
 
 # ---------------------------------------------------------------------------
 # DMG: build a distributable disk image from the (now stapled) app, then sign +
 # notarize + staple the DMG itself. The ticket travels with the .dmg, so a
 # downloaded image passes Gatekeeper even offline — the gold-standard artifact
-# for a GitHub Release. Runs only for a notarized Developer ID build; set DMG=0
-# to skip and ship just the .zip. Uses `create-dmg` (brew) for the nice
+# for a GitHub Release. Runs only for a release (RELEASE=1); set DMG=0 to skip
+# and ship just the .zip. Uses `create-dmg` (brew) for the nice
 # drag-to-Applications layout when present, else a plain hdiutil image.
 # ---------------------------------------------------------------------------
 DMG_PATH="build/${APP_NAME}.dmg"
 
-if [[ "$SIGN_IDENTITY" == Developer\ ID* && "${NOTARIZE:-1}" != "0" && "${DMG:-1}" != "0" ]]; then
+if [[ "${RELEASE:-0}" == "1" && "${DMG:-1}" != "0" ]]; then
   echo "==> Build DMG ($DMG_PATH)"
   rm -f "$DMG_PATH"
   if command -v create-dmg > /dev/null 2>&1; then
