@@ -35,6 +35,25 @@ final class WindowStore: NSObject {
     private var userFocusObserved = false
     /// Throttle for the per-summon reconcile sweep (uptime seconds; monotonic).
     private var lastReconcile: TimeInterval = 0
+    /// Debounce for the focus-driven self-heal reconcile, keyed per pid (uptime seconds). reconcileApp
+    /// is otherwise UNthrottled, so a focus/activation event naming a window AltTab will never track
+    /// (non-standard subrole or sub-24px — filtered by isEligibleWindow) would re-fire a full AX
+    /// enumeration on EVERY such event; this caps it to one sweep per app per 0.25s. Keyed per pid (not
+    /// per wid) ON PURPOSE: per-wid would re-open the unbounded fan-out when an app ping-pongs focus
+    /// between distinct ineligible windows, and would grow without bound (we get no destroy events for
+    /// windows we don't track). The cost is that a genuinely-new eligible window in an app that also has
+    /// a "hot" ineligible window can be discovered up to one debounce window late — harmless, since
+    /// reconcileApp enumerates ALL the app's windows and the summon-time reconcileAllApps is a backstop.
+    private var lastSelfHealByPid: [pid_t: TimeInterval] = [:]
+    /// Uptime of the last switcher commit, and the app that was frontmost AT that moment (the app we
+    /// switched away FROM). Right after a commit our optimistic MRU-0 (set in noteCommitted) is
+    /// authoritative while frontmostApplication still lags (Focus fronts the window asynchronously via
+    /// SLPS) and keeps reporting the from-app. alignFrontmostWindow uses BOTH to suppress realignment
+    /// ONLY in that stale window — keyed on the from-app so a genuine switch to a third app is NOT
+    /// suppressed (see alignFrontmostWindow).
+    private var lastCommitUptime: TimeInterval = 0
+    private var lastCommitFromPid: pid_t = 0
+    private let selfHealDebounce: TimeInterval = 0.25
 
     private let myPid = getpid()
     private var appsKVO: NSKeyValueObservation?
@@ -101,6 +120,7 @@ final class WindowStore: NSObject {
         observers[pid]?.tearDown()
         observers[pid] = nil
         iconCache[pid] = nil
+        lastSelfHealByPid[pid] = nil
         removeWindows(windows.filter { $0.pid == pid })
     }
 
@@ -121,14 +141,78 @@ final class WindowStore: NSObject {
 
     // MARK: - MRU
 
-    /// Called when a window gains focus (from AppObserver or app activation). Main thread.
-    func noteFocused(wid: CGWindowID) {
-        guard let w = byWindowId[wid] else { return }
+    /// Called when a window gains focus (from AppObserver or app activation). Main thread. `pid` is the
+    /// owning app when the caller knows it (focus/activation events always do) — used to self-heal a
+    /// missed window if the wid is unknown.
+    func noteFocused(wid: CGWindowID, pid: pid_t = 0) {
+        guard let w = byWindowId[wid] else {
+            // Focus/activation landed on a window we don't track yet: its kAXWindowCreatedNotification
+            // was missed (the per-app observer races app launch, and some apps never emit it reliably),
+            // so the ONLY thing that would discover it is a summon-time reconcile — which runs AFTER the
+            // session snapshot, leaving the window one summon behind ("shows up only after the first
+            // Cmd+Tab"). Self-heal by enumerating the owning app NOW, off this reliable focus signal —
+            // but debounce per pid: a window AltTab never tracks (ineligible subrole/size) keeps this wid
+            // unknown forever, so an un-debounced reconcile would re-fire on every focus event for it.
+            let now = ProcessInfo.processInfo.systemUptime
+            if pid > 0, now - (lastSelfHealByPid[pid] ?? 0) > selfHealDebounce {
+                lastSelfHealByPid[pid] = now
+                reconcileApp(pid: pid)
+            }
+            return
+        }
         // Only retire cold-start z-order seeding once a focus event is actually APPLIED to a tracked
         // window — early focus events for not-yet-enumerated windows must not suppress seeding.
         userFocusObserved = true
         mruCounter &+= 1
         w.mruStamp = mruCounter
+    }
+
+    /// The switcher just committed focus to `wid`. Stamp the time and do the optimistic MRU-0 bump, so
+    /// the NEXT summon's alignFrontmostWindow trusts THIS order over a frontmostApplication that still
+    /// lags (our SLPS focus path fronts the window asynchronously — see Focus.swift). Passing the pid
+    /// also lets the self-heal run if the committed window was momentarily dropped from the store.
+    func noteCommitted(wid: CGWindowID, pid: pid_t) {
+        lastCommitUptime = ProcessInfo.processInfo.systemUptime
+        // The app frontmost right now (the panel is non-activating, and Focus hasn't fronted the target
+        // yet) is the app we're switching away from — the one a lagging frontmostApplication will keep
+        // reporting until our SLPS commit propagates.
+        lastCommitFromPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        noteFocused(wid: wid, pid: pid)
+    }
+
+    /// Realign MRU to whatever app is frontmost RIGHT NOW. Called synchronously at summon. The MRU
+    /// backbone is entirely event-driven (app-activated / focused-window-changed / window-created), and
+    /// every one of those hops through the AXQueue and a main-thread async — so a Cmd+Tab fired right
+    /// after opening a window can outrun them, leaving the just-focused window either un-promoted or
+    /// not-yet-enumerated. Either way the snapshot would wrongly treat the PREVIOUS app as the current
+    /// one (and skip a step). `frontmostApplication` is maintained by the OS synchronously and needs no
+    /// AX IPC, so it's a safe main-thread oracle for "what is actually current".
+    ///
+    /// Returns whether the frontmost app owns a tracked window: false ⇒ it was just opened and hasn't
+    /// been enumerated yet, so the caller must treat the current MRU-0 as the *previous* window (land
+    /// the first forward press ON it) rather than skipping past it.
+    @discardableResult
+    func alignFrontmostWindow() -> Bool {
+        guard let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              frontPid != myPid else { return true } // unknown / our own front → leave the order as-is
+        guard let top = windows.filter({ $0.pid == frontPid }).max(by: { $0.mruStamp < $1.mruStamp }) else {
+            return false // frontmost app owns no tracked window yet — just opened, not enumerated
+        }
+        // Just after our OWN commit, frontmostApplication still lags our async SLPS focus and keeps
+        // reporting the app we switched away FROM. Re-stamping THAT stale app would demote the window we
+        // just committed to and re-select it — the A→B→A flip breaks. Suppress realignment only in that
+        // exact case: a recent commit AND frontmost still == the from-app. Keying on the from-app (not
+        // the committed app) is deliberate — the hazard IS frontmost reporting the previous app; a
+        // genuine switch to a DIFFERENT app within the window is a real frontmost and must still realign.
+        if frontPid == lastCommitFromPid, ProcessInfo.processInfo.systemUptime - lastCommitUptime < 0.3 {
+            return true
+        }
+        if windows.contains(where: { $0.mruStamp > top.mruStamp }) {
+            mruCounter &+= 1
+            top.mruStamp = mruCounter
+            userFocusObserved = true // a real realignment; don't let cold-start seeding clobber it
+        }
+        return true
     }
 
     private func bumpFocusedWindow(ofPid pid: pid_t) {
@@ -139,7 +223,7 @@ final class WindowStore: NSObject {
                   let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID(),
                   // swiftlint:disable:next force_cast
                   let wid = (f as! AXUIElement).windowId() else { return }
-            DispatchQueue.main.async { self.noteFocused(wid: wid) }
+            DispatchQueue.main.async { self.noteFocused(wid: wid, pid: pid) }
         }
     }
 

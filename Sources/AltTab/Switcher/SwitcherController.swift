@@ -53,7 +53,9 @@ final class SwitcherController: SwitcherSessionControlling {
             // Optimistically make the chosen window MRU index 0 NOW, on the main thread, so a fast second
             // Cmd+Tab sees the new order immediately instead of racing the async AX activation notification
             // (which can lag tens of ms or be coalesced away, breaking the A→B→A "previous window" flip).
-            WindowStore.shared.noteFocused(wid: target.cgWindowId)
+            // noteCommitted also timestamps the commit so the next summon's alignFrontmostWindow won't let
+            // a still-lagging frontmostApplication undo this bump.
+            WindowStore.shared.noteCommitted(wid: target.cgWindowId, pid: target.pid)
             Focus.focus(.init(axWindow: target.axElement, pid: target.pid, cgWindowId: target.cgWindowId))
         }
     }
@@ -66,22 +68,35 @@ final class SwitcherController: SwitcherSessionControlling {
     // MARK: - Session lifecycle
 
     private func begin(forward: Bool) {
+        // Async focus events (app-activated, window-created) can lag a fast Cmd+Tab, so realign the MRU
+        // to whatever is ACTUALLY frontmost BEFORE snapshotting — otherwise a window opened a moment ago
+        // is missing/un-promoted and we'd treat the previous app as current (and switch one step too far).
+        let currentTracked = WindowStore.shared.alignFrontmostWindow()
         windows = WindowStore.shared.sortedForDisplay()
-        // Need at least two windows to switch between; one (or zero) → nothing to do, no panel.
-        guard windows.count > 1 else {
+        // Need a window to switch TO. Normally that's ≥2 (current + another); but when the current
+        // (frontmost) window isn't tracked yet, every tracked window is already a valid target, so ≥1.
+        guard windows.count >= (currentTracked ? 2 : 1) else {
             // KEY diagnostic: a summon that silently does nothing means the store got gutted
             // (e.g. a reconcile from a fullscreen Space dropped every other-Space window).
             Log.session.error("summon bailed: only \(self.windows.count) window(s) in store")
             windows = []
             return
         }
+        // Diagnostic: when the frontmost window isn't tracked yet we proceed with a relaxed guard and
+        // land the first press on MRU-0 (the previous window). The just-opened window may be absent from
+        // THIS frozen snapshot — it's discovered async and appears next summon (you're already on it).
+        if !currentTracked {
+            Log.session.debug("front app window not tracked yet — first press lands on MRU-0 (previous window)")
+        }
         Log.session.log("summon: \(self.windows.count) windows, forward=\(forward), top: \(self.windows.prefix(3).map { "\($0.appName)#\($0.cgWindowId)" }.joined(separator: ", "), privacy: .public)")
         active = true
         HotkeyManager.shared.sessionActive = true // lets the event tap absorb Esc while we're up
         panelShown = false
         let n = windows.count
-        // index 0 == current window; forward first press → previous (1); backward first press → last.
-        selectedIndex = forward ? 1 : n - 1
+        // index 0 == current window when it's tracked → forward's first press skips it (1) to the
+        // previous one. When it's NOT tracked (just opened), MRU-0 is already the previous window →
+        // land the first press ON it (0). Backward's first press → last, either way.
+        selectedIndex = forward ? (currentTracked ? 1 : 0) : n - 1
         drawGeneration += 1
         let gen = drawGeneration
 

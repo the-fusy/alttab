@@ -104,7 +104,7 @@ final class AppObserver {
                 guard let wid = element.windowId() else { return }
                 DispatchQueue.main.async {
                     guard NSRunningApplication(processIdentifier: pid)?.isActive == true else { return }
-                    WindowStore.shared.noteFocused(wid: wid)
+                    WindowStore.shared.noteFocused(wid: wid, pid: pid)
                 }
             }
 
@@ -116,7 +116,7 @@ final class AppObserver {
                       let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() else { return }
                 // swiftlint:disable:next force_cast
                 guard let wid = (f as! AXUIElement).windowId() else { return }
-                DispatchQueue.main.async { WindowStore.shared.noteFocused(wid: wid) }
+                DispatchQueue.main.async { WindowStore.shared.noteFocused(wid: wid, pid: pid) }
             }
 
         default:
