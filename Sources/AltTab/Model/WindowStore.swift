@@ -165,6 +165,7 @@ final class WindowStore: NSObject {
         userFocusObserved = true
         mruCounter &+= 1
         w.mruStamp = mruCounter
+        Log.store.debug("MRU bump wid=\(wid, privacy: .public) (\(w.appName, privacy: .public) – \(w.title, privacy: .public)) → \(self.mruCounter, privacy: .public)")
     }
 
     /// The switcher just committed focus to `wid`. Stamp the time and do the optimistic MRU-0 bump, so

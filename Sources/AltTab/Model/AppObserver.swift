@@ -22,6 +22,7 @@ final class AppObserver {
         kAXWindowCreatedNotification,
         kAXUIElementDestroyedNotification,
         kAXFocusedWindowChangedNotification,
+        kAXMainWindowChangedNotification,
         kAXApplicationActivatedNotification,
         kAXTitleChangedNotification,
     ]
@@ -102,6 +103,30 @@ final class AppObserver {
             // you've already switched away), which would otherwise corrupt "current window = index 0".
             AXQueue.shared.async {
                 guard let wid = element.windowId() else { return }
+                Log.store.debug("AX focusedWindowChanged pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
+                DispatchQueue.main.async {
+                    guard NSRunningApplication(processIdentifier: pid)?.isActive == true else { return }
+                    WindowStore.shared.noteFocused(wid: wid, pid: pid)
+                }
+            }
+
+        case kAXMainWindowChangedNotification:
+            // Switching between an app's NATIVE window-tabs (Ghostty, Terminal, Safari…) re-selects a
+            // different backing window WITHOUT an app activation (the app was already front) and, on many
+            // apps, WITHOUT a focused-window-changed — only the MAIN window changes. Neither of our other
+            // two MRU signals catches that, so the just-activated tab never reaches MRU-0 and the
+            // switcher's "previous window" goes stale (Cmd+Tab lands on the tab you used BEFORE the last
+            // one). Read the app's current main window and bump it, gated on the app being frontmost
+            // (same "don't let a background app corrupt index 0" invariant as focused-window-changed).
+            // `element` is unreliable here (app vs. window varies), so read kAXMainWindow off the app.
+            AXQueue.shared.async {
+                let appElement = AXUIElementCreateApplication(pid)
+                var mainWin: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWin) == .success,
+                      let m = mainWin, CFGetTypeID(m) == AXUIElementGetTypeID(),
+                      // swiftlint:disable:next force_cast
+                      let wid = (m as! AXUIElement).windowId() else { return }
+                Log.store.debug("AX mainWindowChanged pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
                 DispatchQueue.main.async {
                     guard NSRunningApplication(processIdentifier: pid)?.isActive == true else { return }
                     WindowStore.shared.noteFocused(wid: wid, pid: pid)
@@ -116,6 +141,7 @@ final class AppObserver {
                       let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() else { return }
                 // swiftlint:disable:next force_cast
                 guard let wid = (f as! AXUIElement).windowId() else { return }
+                Log.store.debug("AX applicationActivated pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
                 DispatchQueue.main.async { WindowStore.shared.noteFocused(wid: wid, pid: pid) }
             }
 
