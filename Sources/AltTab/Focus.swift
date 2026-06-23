@@ -60,8 +60,12 @@ enum Focus {
         _SLPSSetFrontProcessWithOptions(&psn, target.cgWindowId, 0x200 /* userGenerated */)
         makeKeyWindow(&psn, target.cgWindowId)
         AXUIElementPerformAction(target.axWindow, kAXRaiseAction as CFString)
-        // Belt-and-suspenders: ensure the app is frontmost even if SLPS no-ops on some OS build.
-        NSRunningApplication(processIdentifier: target.pid)?.activate(options: [])
+        // NOTE: do NOT add NSRunningApplication.activate() here as a "belt-and-suspenders". The SLPS
+        // sequence above already fronts the EXACT named window. App-level activation, by contrast,
+        // raises ALL of the app's windows as a group — and on macOS 27 even the deprecated empty-option
+        // form `activate(options: [])` does so, shoving every sibling window of a multi-window app in
+        // front of the app you switched from. Upstream alt-tab-macos relies on SLPS alone for the same
+        // reason. If SLPS ever no-ops on a future OS, switch the whole path to focusPublic() instead.
     }
 
     /// The undocumented 0xf8-byte WindowServer event record that makes a specific window key.
