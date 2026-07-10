@@ -7,7 +7,7 @@
 //  (fine for our Developer-ID + notarized distribution) and have been stable on macOS 13/14/15 on
 //  Apple Silicon.
 //
-//  Five symbols, in two groups:
+//  Seven symbols, in three groups:
 //
 //   identity / hotkey (always used):
 //    1. _AXUIElementGetWindow        — AX window element → CGWindowID (our stable identity key).
@@ -17,6 +17,12 @@
 //    3. GetProcessForPID             — pid → ProcessSerialNumber, needed by the SLPS calls.
 //    4. _SLPSSetFrontProcessWithOptions — front a process while naming a specific window id.
 //    5. SLPSPostEventRecordTo        — post the WindowServer "make this window key" event record.
+//
+//   window Space membership (liveness; see WindowStore.applyReconcile):
+//    6. _CGSDefaultConnection        — our WindowServer connection id, needed to address (7).
+//    7. CGSCopySpacesForWindows      — which Spaces host given windows; distinguishes a real
+//                                      other-Space window (keep) from an ordered-out ghost an
+//                                      AX-dead app leaves in the WindowServer list (drop).
 //
 //  Why (3)–(5): raising a SPECIFIC window of a multi-window app is exactly what a window switcher must
 //  do, and there is no robust PUBLIC API for it (NSRunningApplication.activate fronts the app's main
@@ -72,3 +78,18 @@ func _SLPSSetFrontProcessWithOptions(_ psn: UnsafeMutablePointer<ProcessSerialNu
 @_silgen_name("SLPSPostEventRecordTo")
 @discardableResult
 func SLPSPostEventRecordTo(_ psn: UnsafeMutablePointer<ProcessSerialNumber>, _ bytes: UnsafeMutablePointer<UInt8>) -> CGError
+
+// MARK: - Window Space membership (PRIVATE; SkyLight)
+
+/// Our per-process connection id to the WindowServer. C signature `CGSConnectionID _CGSDefaultConnection(void)`;
+/// CGSConnectionID is a C `int` ⇒ Int32. Stable across macOS 13–15 on Apple Silicon.
+@_silgen_name("_CGSDefaultConnection")
+func _CGSDefaultConnection() -> Int32
+
+/// The Space ids that host the given window ids. C signature
+/// `CFArrayRef CGSCopySpacesForWindows(CGSConnectionID, CGSSpaceMask, CFArrayRef windowIDs)`.
+/// `mask` selects which Space category to include; 0x7 = all (current | other | user). The windowIDs
+/// array bridges from `[NSNumber]`; the result bridges to `[NSNumber]` of Space ids (empty = the
+/// window is on NO Space, i.e. a WindowServer ghost). Used only as a liveness tiebreaker in reconcile.
+@_silgen_name("CGSCopySpacesForWindows")
+func CGSCopySpacesForWindows(_ cid: Int32, _ mask: Int32, _ windowIDs: CFArray) -> CFArray?
