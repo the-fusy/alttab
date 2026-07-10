@@ -216,6 +216,41 @@ final class WindowStore: NSObject {
         return true
     }
 
+    /// Synchronously enumerate the FRONTMOST app's current-Space windows and add any we don't track yet,
+    /// so a window just opened in an app that doesn't emit a reliable kAXWindowCreatedNotification
+    /// (Telegram/ChatGPT recreate their window on open, with a new wid, and their AXObserver often stays
+    /// silent) is present on the FIRST Cmd+Tab instead of a summon late. Called on the main thread at
+    /// summon, right before the display snapshot.
+    ///
+    /// Doing AX IPC on the main thread is normally forbidden here (a hung app would freeze the panel and
+    /// the event tap), but this is the ONE safe place: the FRONTMOST app is by definition active, so its
+    /// AX answers promptly — and a short per-element messaging timeout caps the worst case. Gated to run
+    /// ONLY when the frontmost app owns no tracked window (the just-opened-first-window race), so the
+    /// common summon pays nothing. A window opened in an app that ALREADY has a tracked window still
+    /// appears one summon late — acceptable, since the summon already has a valid target to show.
+    func ensureFrontmostAppTracked() {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let pid = app.processIdentifier
+        guard pid > 0, pid != myPid, isEligibleApp(app),
+              !windows.contains(where: { $0.pid == pid }) else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1) // bound the main-thread stall if the app hangs
+        let appName = app.localizedName ?? ""
+        for el in appElement.currentSpaceWindows() {
+            AXUIElementSetMessagingTimeout(el, 0.1)
+            guard let wid = el.windowId(), wid != 0, byWindowId[wid] == nil else { continue }
+            let attrs = readWindowAttrs(el)
+            guard isEligibleWindow(attrs) else { continue }
+            mruCounter &+= 1
+            let w = WindowInfo(cgWindowId: wid, pid: pid, axElement: el,
+                               title: attrs.title ?? "", appName: appName,
+                               icon: iconCache[pid], mruStamp: mruCounter)
+            windows.append(w)
+            byWindowId[wid] = w
+            Log.store.debug("sync-added frontmost \(appName, privacy: .public) – \(attrs.title ?? "", privacy: .public) [wid \(wid)] on summon")
+        }
+    }
+
     private func bumpFocusedWindow(ofPid pid: pid_t) {
         let appElement = AXUIElementCreateApplication(pid)
         AXQueue.shared.async {

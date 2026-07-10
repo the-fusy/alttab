@@ -68,6 +68,11 @@ final class SwitcherController: SwitcherSessionControlling {
     // MARK: - Session lifecycle
 
     private func begin(forward: Bool) {
+        // A window just opened in an app with unreliable AX (Telegram/ChatGPT recreate their window on
+        // open and stay silent on kAXWindowCreatedNotification) is discovered only by the async summon
+        // reconcile — one summon too late ("missing on the first Cmd+Tab"). Since the frontmost app is
+        // active (⇒ AX responds), synchronously pull its windows into the model NOW, before we snapshot.
+        WindowStore.shared.ensureFrontmostAppTracked()
         // Async focus events (app-activated, window-created) can lag a fast Cmd+Tab, so realign the MRU
         // to whatever is ACTUALLY frontmost BEFORE snapshotting — otherwise a window opened a moment ago
         // is missing/un-promoted and we'd treat the previous app as current (and switch one step too far).

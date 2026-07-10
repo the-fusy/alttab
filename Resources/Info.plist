@@ -28,9 +28,9 @@
 
     <!-- Versioning. Bump these per release (build.sh can sed them, or edit by hand). -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.4</string>
+    <string>0.1.5</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
 
     <!-- Launch behavior, read by LaunchServices before the process starts. -->
     <key>LSMinimumSystemVersion</key>
