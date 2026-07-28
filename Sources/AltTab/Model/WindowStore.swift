@@ -228,15 +228,22 @@ final class WindowStore: NSObject {
     /// ONLY when the frontmost app owns no tracked window (the just-opened-first-window race), so the
     /// common summon pays nothing. A window opened in an app that ALREADY has a tracked window still
     /// appears one summon late — acceptable, since the summon already has a valid target to show.
-    func ensureFrontmostAppTracked() {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+    ///
+    /// Returns whether the frontmost app is definitively WINDOWLESS: its AX answered and it owns no
+    /// eligible window at all (you just closed its last one — Cmd+W in Calendar). The caller needs that
+    /// to read the snapshot correctly: "front app owns no tracked window" otherwise means "it has one we
+    /// haven't enumerated yet", and the two want opposite first-press targets (see SwitcherController).
+    @discardableResult
+    func ensureFrontmostAppTracked() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
         let pid = app.processIdentifier
         guard pid > 0, pid != myPid, isEligibleApp(app),
-              !windows.contains(where: { $0.pid == pid }) else { return }
+              !windows.contains(where: { $0.pid == pid }) else { return false }
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.1) // bound the main-thread stall if the app hangs
         let appName = app.localizedName ?? ""
-        for el in appElement.currentSpaceWindows() {
+        let (elements, axAnswered) = appElement.currentSpaceWindows()
+        for el in elements {
             AXUIElementSetMessagingTimeout(el, 0.1)
             guard let wid = el.windowId(), wid != 0, byWindowId[wid] == nil else { continue }
             let attrs = readWindowAttrs(el)
@@ -249,6 +256,41 @@ final class WindowStore: NSObject {
             byWindowId[wid] = w
             Log.store.debug("sync-added frontmost \(appName, privacy: .public) – \(attrs.title ?? "", privacy: .public) [wid \(wid)] on summon")
         }
+        // Windowless only if the app ANSWERED and still owns nothing: an AX failure enumerates as zero
+        // windows too, and calling that "windowless" would skip a step on every summon into a hung app.
+        return axAnswered && !windows.contains(where: { $0.pid == pid })
+    }
+
+    /// Synchronously drop the FRONTMOST app's ghost windows — a window it closed without the
+    /// WindowServer destroying the record (Calendar on Cmd+W) — right before the display snapshot.
+    ///
+    /// Why this can't wait for the async reconcile: closing a window emits no reliable AX signal
+    /// (Calendar sends no kAXUIElementDestroyed), so the ghost is discovered only by the summon-time
+    /// reconcileAllApps — which runs AFTER `sortedForDisplay()` froze the snapshot. The ghost would
+    /// therefore be shown for one full summon after every close: exactly the "I hit Cmd+W and the app is
+    /// still in the switcher, but selecting it does nothing" report.
+    ///
+    /// Cheap and AX-free: the ghost signature (not ordered on-screen AND on no Space) is read from the
+    /// WindowServer, never from the app, so no hung app can stall the main thread. The expensive
+    /// CGWindowList call is made ONLY when a Space query already flagged a candidate, which for the
+    /// common summon is never. Restricted to the frontmost app ON PURPOSE: it is by definition active,
+    /// so its AX is alive and "the app closed this window" is the only reading left — the same
+    /// `axAnswered` gate reconcileApp applies, obtained for free. Background apps keep going through
+    /// reconcile, which can afford to ask their AX off-main.
+    func dropFrontmostGhostWindows() {
+        guard let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              frontPid != myPid else { return }
+        let tracked = windows.filter { $0.pid == frontPid }
+        guard !tracked.isEmpty else { return }
+        // Spaces first (one cheap WindowServer call per window, and the front app owns few).
+        let candidates = tracked.filter { Self.spaces(of: [$0.cgWindowId]).isEmpty }
+        guard !candidates.isEmpty else { return }
+        let onscreen = Self.onscreenWindowIds()
+        guard !onscreen.isEmpty else { return } // CG failure ⇒ liveness unknown ⇒ drop nothing
+        let ghosts = candidates.filter { !onscreen.contains($0.cgWindowId) }
+        guard !ghosts.isEmpty else { return }
+        Log.store.log("summon: dropping \(ghosts.count) ghost window(s) of front app \(ghosts[0].appName, privacy: .public): \(ghosts.map { "\($0.title)#\($0.cgWindowId)" }.joined(separator: " | "), privacy: .public)")
+        removeWindows(ghosts)
     }
 
     private func bumpFocusedWindow(ofPid pid: pid_t) {
@@ -328,7 +370,9 @@ final class WindowStore: NSObject {
     /// The set of Space ids that host ANY of `wids` (mask 0x7 = all Spaces). The result is a UNION over
     /// the input, not a per-window map — so pass a SINGLE wid to learn one window's Spaces, or the whole
     /// on-screen set to learn "which Spaces are current". [] = no Space (a WindowServer ghost) or the
-    /// query failed. Off the main thread (a WindowServer IPC), like the other reconcile reads.
+    /// query failed. Normally called off the main thread with the other reconcile reads; the summon-time
+    /// ghost cull (dropFrontmostGhostWindows) calls it on MAIN, which is safe precisely because this is a
+    /// WindowServer IPC and not an AX one — no third-party app is on the other end to hang us.
     private static func spaces(of wids: [CGWindowID]) -> Set<Int> {
         guard !wids.isEmpty else { return [] }
         let arr = wids.map { NSNumber(value: $0) } as CFArray
@@ -367,27 +411,40 @@ final class WindowStore: NSObject {
             let existing = existence?.wids ?? Self.allWindowIds()
             let onscreen = existence?.onscreen ?? Self.onscreenWindowIds()
             let currentSpaces = existence?.currentSpaces ?? Self.spaces(of: Array(onscreen))
-            // Ordered-out cull. An app whose AX is DEAD (e.g. ChatGPT backgrounded returns
-            // kAXErrorCannotComplete for kAXWindows) enumerates as zero windows, so ALL its tracked
-            // windows look "absent from the current Space" — and because it leaves closed windows
-            // registered in the WindowServer list, the plain existence oracle never drops them. Cull the
-            // ONE unambiguous ghost signature: a window that is NOT ordered on-screen yet is assigned to
-            // the CURRENT Space (spaces ⊆ currentSpaces, non-empty). A healthy app keeps even its
-            // ordered-out windows in kAXWindows, so this only ever bites an AX-dead app's leftover.
-            // Deliberately SPARED: a window on NO Space (spaces=[]) — that is how a "close-to-tray" app
-            // (Telegram, Discord…) parks a still-switchable background window; culling it would wrongly
-            // drop a live app from the switcher. And a window on ANOTHER Space keeps a non-current id.
-            // currentSpaces empty ⇒ Space info unavailable ⇒ leave orderedOutDead nil so the cull is
-            // skipped entirely and we never over-drop.
+            // Enumerate FIRST: whether the app's AX answered gates the no-Space cull below.
+            let (elements, axAnswered) = appElement.currentSpaceWindows()
+            // Ghost cull. An app that closes a window without destroying its WindowServer record leaves a
+            // tracked window that the plain existence oracle never drops (Calendar does exactly this on
+            // Cmd+W; so does an AX-DEAD app like a backgrounded ChatGPT, whose kAXWindows returns
+            // kAXErrorCannotComplete so ALL its windows look "absent from the current Space"). Two ghost
+            // signatures, both requiring the window to NOT be ordered on-screen:
+            //   • assigned to the CURRENT Space (spaces ⊆ currentSpaces, non-empty) — ordered out where we
+            //     can see it ⇒ dead. A healthy app keeps even its ordered-out windows in kAXWindows, so
+            //     this only bites an AX-dead app's leftover.
+            //   • assigned to NO Space (spaces=[]) — the WindowServer still lists the id but places it
+            //     nowhere. MEASURED (macOS 26): every live state keeps its Space id — ordered-out,
+            //     minimized-to-Dock and app-hidden (Cmd+H) windows all report the Space they sit on, and
+            //     another Space keeps a non-current id. Only a closed-but-not-destroyed window reports [].
+            //     Gated on `axAnswered`: with a DEAD AX we cannot tell "closed" from "app not answering",
+            //     so we keep sparing it (that is how a "close-to-tray" app may park a background window).
+            // A window on ANOTHER Space keeps a non-current id and is spared by both rules. currentSpaces
+            // empty ⇒ Space info unavailable ⇒ leave the sets nil so the cull is skipped and we never
+            // over-drop.
             var orderedOutDead: Set<CGWindowID>?
+            var noSpaceDead: Set<CGWindowID>?
             if !currentSpaces.isEmpty {
-                orderedOutDead = Set(trackedWids.filter { wid in
-                    if onscreen.contains(wid) { return false }             // ordered on-screen ⇒ alive
+                var orderedOut = Set<CGWindowID>(), noSpace = Set<CGWindowID>()
+                for wid in trackedWids where !onscreen.contains(wid) { // ordered on-screen ⇒ alive
                     let sp = Self.spaces(of: [wid])
-                    return !sp.isEmpty && sp.allSatisfy { currentSpaces.contains($0) } // current-Space + ordered out ⇒ dead
-                })
+                    if sp.isEmpty {
+                        if axAnswered { noSpace.insert(wid) }
+                    } else if sp.allSatisfy({ currentSpaces.contains($0) }) {
+                        orderedOut.insert(wid)
+                    }
+                }
+                orderedOutDead = orderedOut
+                noSpaceDead = noSpace
             }
-            let elements = appElement.currentSpaceWindows()
             var live: [(CGWindowID, AXUIElement, WindowAttrs)] = []
             for el in elements {
                 guard let wid = el.windowId(), wid != 0 else { continue }
@@ -397,13 +454,15 @@ final class WindowStore: NSObject {
             }
             DispatchQueue.main.async {
                 self.applyReconcile(pid: pid, live: live, existing: existing,
-                                    orderedOutDead: orderedOutDead, appName: appName)
+                                    orderedOutDead: orderedOutDead, noSpaceDead: noSpaceDead,
+                                    appName: appName)
             }
         }
     }
 
     private func applyReconcile(pid: pid_t, live: [(CGWindowID, AXUIElement, WindowAttrs)],
-                                existing: Set<CGWindowID>?, orderedOutDead: Set<CGWindowID>?, appName: String) {
+                                existing: Set<CGWindowID>?, orderedOutDead: Set<CGWindowID>?,
+                                noSpaceDead: Set<CGWindowID>?, appName: String) {
         // The app can quit between the AXQueue read and this main-thread apply; appQuit has already
         // torn down its observer and removed its windows — adding `live` back would resurrect them.
         guard observers[pid] != nil else { return }
@@ -411,20 +470,23 @@ final class WindowStore: NSObject {
         // kAXWindows covers the CURRENT Space only, so "absent from it" is NOT "closed": windows on
         // other Spaces (e.g. a fullscreen-video Space) must survive a reconcile run from elsewhere —
         // dropping them used to gut the model and erase MRU history whenever a summon happened on
-        // another Space. A tracked window is dead when EITHER the WindowServer no longer lists it at all
-        // (`gone`), OR it is still listed but ordered out on the CURRENT Space (`orderedOut` — an AX-dead
-        // app's closed window that lingers in the WindowServer list; see reconcileApp). With no existence
-        // info (CG failure) we drop nothing and rely on kAXUIElementDestroyed; with no Space info
-        // orderedOutDead is nil and only the `gone` rule fires.
+        // another Space. A tracked window is dead when the WindowServer no longer lists it at all
+        // (`gone`), or when it is still listed but carries a ghost signature: ordered out on the CURRENT
+        // Space (`orderedOut`), or on NO Space at all with the app's AX answering (`noSpace` — Calendar's
+        // closed-but-not-destroyed window; see reconcileApp). With no existence info (CG failure) we drop
+        // nothing and rely on kAXUIElementDestroyed; with no Space info both ghost sets are nil and only
+        // the `gone` rule fires.
         let absent = windows.filter { $0.pid == pid && !liveWids.contains($0.cgWindowId) }
+        let listed = absent.filter { existing?.contains($0.cgWindowId) == true }
         let gone = absent.filter { existing?.contains($0.cgWindowId) == false }
-        let orderedOut = absent.filter { existing?.contains($0.cgWindowId) == true && orderedOutDead?.contains($0.cgWindowId) == true }
-        let dead = gone + orderedOut
+        let orderedOut = listed.filter { orderedOutDead?.contains($0.cgWindowId) == true }
+        let noSpace = listed.filter { noSpaceDead?.contains($0.cgWindowId) == true }
+        let dead = gone + orderedOut + noSpace
         if absent.count > dead.count {
             Log.store.debug("reconcile \(appName, privacy: .public): keeping \(absent.count - dead.count) off-Space window(s)")
         }
         if !dead.isEmpty {
-            Log.store.log("reconcile \(appName, privacy: .public): dropping \(dead.count) window(s) [\(gone.count) gone, \(orderedOut.count) ordered-out]: \(dead.map { "\($0.title)#\($0.cgWindowId)" }.joined(separator: " | "), privacy: .public)")
+            Log.store.log("reconcile \(appName, privacy: .public): dropping \(dead.count) window(s) [\(gone.count) gone, \(orderedOut.count) ordered-out, \(noSpace.count) no-Space]: \(dead.map { "\($0.title)#\($0.cgWindowId)" }.joined(separator: " | "), privacy: .public)")
             removeWindows(dead)
         }
         // `live` is front-to-back (kAXWindows order). Stamp NEW windows back-to-front so the front-most

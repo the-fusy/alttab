@@ -61,17 +61,23 @@ extension AXUIElement {
         return _AXUIElementGetWindow(self, &id) == .success ? id : nil
     }
 
-    /// The app's current-Space windows via kAXWindowsAttribute (AXUIElement.swift:139-150).
-    /// We deliberately do NOT brute-force other-Space windows (AXUIElement.swift:153-176 DROPPED).
-    func currentSpaceWindows() -> [AXUIElement] {
+    /// The app's current-Space windows via kAXWindowsAttribute (AXUIElement.swift:139-150), plus
+    /// WHETHER kAXWindows ANSWERED at all. We deliberately do NOT brute-force other-Space windows
+    /// (AXUIElement.swift:153-176 DROPPED).
+    ///
+    /// `answered` is a liveness gate, not a detail: an app whose AX is dead (a backgrounded ChatGPT
+    /// returns kAXErrorCannotComplete) enumerates as ZERO windows and is otherwise indistinguishable
+    /// from an app that genuinely closed all of them. Only when the app ANSWERED does "not in
+    /// kAXWindows" carry information — see WindowStore.reconcileApp's ghost cull.
+    func currentSpaceWindows() -> (windows: [AXUIElement], answered: Bool) {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(self, kAXWindowsAttribute as CFString, &value) == .success,
-              let arr = value as? [AXUIElement] else { return [] }
+              let arr = value as? [AXUIElement] else { return ([], false) }
         // macOS sometimes returns duplicate elements (e.g. Mail at login); dedupe while PRESERVING the
         // kAXWindows front-to-back order. `Array(Set:)` would randomize it, scrambling the per-app MRU
         // seeding so "previous window" (index 1) became arbitrary for any multi-window app.
         var seen = Set<AXUIElement>()
-        return arr.filter { seen.insert($0).inserted }
+        return (arr.filter { seen.insert($0).inserted }, true)
     }
 }
 
