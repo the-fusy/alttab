@@ -51,8 +51,10 @@ hotkeys, session, store, focus). Default/error-level events persist on disk — 
 `./scripts/logs.sh 10m` dumps the last 10 min to a file; bare `./scripts/logs.sh` streams live
 (incl. debug-level, which is memory-only and absent from dumps). Crash reports (none so far) would
 land in `~/Library/Logs/DiagnosticReports/`. Key persisted events: per-summon window count
-("summon bailed" = store got gutted), reconcile drops in WindowStore (only when the WindowServer no
-longer lists the window — kAXWindows absence just means "other Space" and KEEPS it, debug-logged),
+("summon bailed" = store got gutted), window drops in WindowStore — reconcile drops (`gone` = the
+WindowServer no longer lists it; `ordered-out` / `no-Space` = ghost signatures of a closed-but-not-
+destroyed window, see DECISIONS §10) and the summon-time front-app ghost cull; kAXWindows absence
+alone just means "other Space" and KEEPS the window (debug-logged),
 event-tap disabled-by-OS, Focus fallbacks.
 
 ## Code map (quick)

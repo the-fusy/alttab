@@ -190,3 +190,40 @@ After the first real run, the following were decided and applied:
   `userFocusObserved` only latches once a focus event is actually applied; a missed
   destroy identity-match forces an un-throttled per-app reconcile; the Launch-at-Login
   toggle reflects real `SMAppService` status and surfaces `.requiresApproval`.
+
+---
+
+## 10. Window liveness: the "closed window still in the switcher" class of bug (0.1.6)
+
+Symptom (Calendar, Cmd+W): the window is gone from the screen, but its tile stays in the
+switcher and selecting it does nothing. Measured on macOS 26 with a WindowServer-only probe
+(`CGWindowList` + `CGSCopySpacesForWindows`, no AX), across every way a window can leave the
+screen:
+
+| state | listed by the WindowServer | ordered on-screen | Spaces |
+|---|---|---|---|
+| open | yes | yes | `[current]` |
+| closed (ordinary AppKit `close`) | **no** | — | — |
+| ordered out ("close to tray") | yes | no | `[current]` |
+| minimized to the Dock | yes | no | `[current]` |
+| app hidden (Cmd+H) | yes | no | `[current]` |
+| **closed in Calendar** | yes | no | **`[]`** |
+
+Two conclusions drive the fix:
+
+- **"On no Space at all" is an unambiguous ghost signature.** Every state in which a window
+  can still be switched to keeps its Space id; only a closed-but-not-destroyed window reports
+  an empty set. Calendar's leftover therefore escaped both existing rules (`gone` — still
+  listed; ordered-out-on-current-Space — no Space to compare), which is why it survived until
+  the process itself quit. It is now culled, **gated on the app's AX having answered**: with a
+  dead AX (a backgrounded ChatGPT returns `kAXErrorCannotComplete`) "not in `kAXWindows`" says
+  nothing, so those are still spared. `currentSpaceWindows()` returns that `answered` flag —
+  previously an AX failure and a genuinely window-less app were indistinguishable.
+- **Timeliness needs a synchronous cull, symmetric to `ensureFrontmostAppTracked`.** Closing a
+  window emits no reliable AX signal (Calendar sends no `kAXUIElementDestroyed`), so a ghost is
+  found only by the summon-time reconcile — which runs *after* `sortedForDisplay()` froze the
+  snapshot, showing the ghost for one full summon after every close. `dropFrontmostGhostWindows()`
+  culls it on the main thread before the snapshot. It is AX-free (the signature comes from the
+  WindowServer, so no hung app can stall main), pays for the `CGWindowList` call only when a
+  Space query already flagged a candidate, and is restricted to the frontmost app — which, being
+  active, satisfies the same `axAnswered` gate for free.
