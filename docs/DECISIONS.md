@@ -66,7 +66,7 @@ thumbnails, RTL handling, Liquid Glass, and the big settings window.
 | T4 ✅ | **All private APIs isolated in one file** (`PrivateAPIs.swift`) | When a macOS update breaks a private symbol, the blast radius is one file. Live private surface: 5 symbols (see T9). |
 | T5 🔁 | **Apps via `NSWorkspace.runningApplications` + KVO**; **windows via per-app Accessibility** (`AXUIElementCreateApplication` → `kAXWindowsAttribute`) | `kAXWindowsAttribute` can only *enumerate* current-Space windows; we still avoid the brute-force `_AXUIElementCreateWithRemoteToken` trick. Cross-Space coverage comes from remembering windows once seen (P6), with `CGWindowList` (all Spaces) as the liveness oracle — kAXWindows absence means "other Space", not "closed". |
 | T6 ✅ | **Window identity = `CGWindowID`** via private `_AXUIElementGetWindow` | Stable identity across AX re-fetches; one tiny, very stable private call. |
-| T7 ✅ | **MRU = monotonic counter per window**, bumped on `kAXApplicationActivatedNotification` / `kAXFocusedWindowChangedNotification` / `kAXMainWindowChangedNotification` | Simpler than and equivalent to alt-tab's dense-rank rotation. Sort descending at show time. **`kAXMainWindowChangedNotification` is required** for native window-tab switches (Ghostty/Terminal/Safari): selecting another tab re-points the app's *main* window with no app-activation and often no focused-window-changed, so without it the just-used tab never reaches MRU-0 and Cmd+Tab lands on the previously-used tab. We read the app's `kAXMainWindow` and bump it, gated on the app being frontmost (same index-0 invariant as the focused-window path). |
+| T7 ✅ | **MRU = monotonic counter per window**, bumped on `kAXApplicationActivatedNotification` / `kAXFocusedWindowChangedNotification` / `kAXMainWindowChangedNotification` | Simpler than and equivalent to alt-tab's dense-rank rotation. Sort descending at show time. **`kAXMainWindowChangedNotification` is required** for native window-tab switches (terminals, browsers): selecting another tab re-points the app's *main* window with no app-activation and often no focused-window-changed, so without it the just-used tab never reaches MRU-0 and Cmd+Tab lands on the previously-used tab. We read the app's `kAXMainWindow` and bump it, gated on the app being frontmost (same index-0 invariant as the focused-window path). |
 | T8 ✅ | **AX IPC off the main thread**, with a low `AXUIElementSetMessagingTimeout`; mutate the model on main | An unresponsive app must never freeze the switcher. |
 | T9 ✅ | **Focus/raise = private SLPS (primary), public fallback** | Initially shipped public-only (`kAXRaise` + `activate`), but the review judged that unreliable for fronting a *specific* window of a multi-window app — the app's whole job. So the primary path is the proven SLPS sequence the original AltTab uses: `_SLPSSetFrontProcessWithOptions` (front process, name window id) → `makeKeyWindow` (the 0xf8-byte WindowServer record) → `kAXRaise`. The public-only path remains in `Focus.swift` as a one-line fallback if a future macOS breaks the record. **macOS 27 note:** an earlier belt-and-suspenders `NSRunningApplication.activate(options: [])` tail was **removed** — on macOS 27 even the deprecated empty-option form raises *all* of a multi-window app's windows as a group (every sibling jumps in front of the app you switched from), defeating the per-window front. SLPS alone fronts the exact named window, so the tail was pure regression. This raises the live private surface to 5 symbols — accepted: precise focus is the point. |
 | T10 ✅ | **Input model** | Carbon `RegisterEventHotKey` for Cmd+Tab (re-fires each Tab while Cmd held → drives both summon and forward cycling); a `CGEventTap` (background run-loop thread) watching `.flagsChanged` (Cmd release = commit, never absorbed; while a session is up, a Shift down-edge = step back one — Cmd+Shift, gated on the Shift keycode so each tap = one step) and `.keyDown` (Esc = cancel, absorbed while a session is active). Esc lives in the tap rather than an `NSEvent` local monitor because a non-activating panel can't reliably receive a local monitor's key events. Plus a hardware-modifier poll so a dropped Cmd-up can't strand the panel. |
@@ -195,7 +195,7 @@ After the first real run, the following were decided and applied:
 
 ## 10. Window liveness: the "closed window still in the switcher" class of bug (0.1.6)
 
-Symptom (Calendar, Cmd+W): the window is gone from the screen, but its tile stays in the
+Symptom (a stock macOS app, Cmd+W): the window is gone from the screen, but its tile stays in the
 switcher and selecting it does nothing. Measured on macOS 26 with a WindowServer-only probe
 (`CGWindowList` + `CGSCopySpacesForWindows`, no AX), across every way a window can leave the
 screen:
@@ -207,23 +207,95 @@ screen:
 | ordered out ("close to tray") | yes | no | `[current]` |
 | minimized to the Dock | yes | no | `[current]` |
 | app hidden (Cmd+H) | yes | no | `[current]` |
-| **closed in Calendar** | yes | no | **`[]`** |
+| **closed in the app above** | yes | no | **`[]`** |
 
 Two conclusions drive the fix:
 
 - **"On no Space at all" is an unambiguous ghost signature.** Every state in which a window
   can still be switched to keeps its Space id; only a closed-but-not-destroyed window reports
-  an empty set. Calendar's leftover therefore escaped both existing rules (`gone` — still
+  an empty set. That leftover therefore escaped both existing rules (`gone` — still
   listed; ordered-out-on-current-Space — no Space to compare), which is why it survived until
   the process itself quit. It is now culled, **gated on the app's AX having answered**: with a
-  dead AX (a backgrounded ChatGPT returns `kAXErrorCannotComplete`) "not in `kAXWindows`" says
+  dead AX (a backgrounded Electron-style app returns `kAXErrorCannotComplete`) "not in `kAXWindows`" says
   nothing, so those are still spared. `currentSpaceWindows()` returns that `answered` flag —
   previously an AX failure and a genuinely window-less app were indistinguishable.
 - **Timeliness needs a synchronous cull, symmetric to `ensureFrontmostAppTracked`.** Closing a
-  window emits no reliable AX signal (Calendar sends no `kAXUIElementDestroyed`), so a ghost is
+  window emits no reliable AX signal (some apps send no `kAXUIElementDestroyed`), so a ghost is
   found only by the summon-time reconcile — which runs *after* `sortedForDisplay()` froze the
   snapshot, showing the ghost for one full summon after every close. `dropFrontmostGhostWindows()`
   culls it on the main thread before the snapshot. It is AX-free (the signature comes from the
   WindowServer, so no hung app can stall main), pays for the `CGWindowList` call only when a
   Space query already flagged a candidate, and is restricted to the frontmost app — which, being
   active, satisfies the same `axAnswered` gate for free.
+
+---
+
+## 11. Stale focus answers: the "Cmd+Tab flips between the last and the one before that" bug (0.1.7)
+
+Symptom: a single Cmd+Tab occasionally lands on the app used *two* switches ago instead of the
+previous one — intermittently, and only during quick back-and-forth switching.
+
+Measured, not guessed. `log show` over a working day, pairing every `commit → W` with the next
+`summon: … top:`, found 12 of ~160 fast pairs where the resulting order was not "W on top, the rest
+unchanged". Eight of them kept index 0 correct and had **indices 1 and 2 swapped** — exactly the
+symptom. A live debug stream then caught it happening with no user input at all:
+
+(A, B, C are three ordinary apps; seconds are relative)
+
+```
+29.381  COMMIT A#1
+29.382  MRU bump A#1 → 12871     ← ours, correct
+29.966  MRU bump B#2 → 12872     ← no key was pressed
+31.021  MRU bump C#3 → 12873
+32.074  MRU bump B#2 → 12874
+33.128  MRU bump C#3 → 12875
+34.173  MRU bump B#2 → 12876
+34.738  summon top: A, B, C      ← expected [A, C, B]
+```
+
+Two facts pin the cause. The phantom bumps arrive **1.05s apart, every time** — the global AX
+messaging timeout (`setGlobalMessagingTimeout(1)`), i.e. the serial `AXQueue` sitting out a timeout
+per block. And the stream contains no `AX applicationActivated`/`mainWindowChanged` lines at all, so
+every one of those bumps came from the only path to `noteFocused` without a debug line in front of
+it: `bumpFocusedWindow`, driven by `NSWorkspace.didActivateApplication`.
+
+So the MRU backbone was **asking AX which window has the focus, and applying whatever came back,
+whenever it came back**. Activation notifications are prompt and ordered; the AX read that refines
+them is neither, because a summon enqueues one reconcile block per app and one unresponsive app
+delays everything behind it. Answers landed seconds late, after the user had committed elsewhere,
+and pushed a window nobody chose to MRU index 1. `alignFrontmostWindow` hid half of it by fixing
+index 0 at summon — which is why the top of the list always looked right and the *previous* window
+did not.
+
+The fix separates the trustworthy signal from the slow one:
+
+- **Order comes from `NSWorkspace`, synchronously.** `noteActivated(pid:)` runs on the main thread
+  and bumps the app's most-recently-used window from the model alone — no AX, no queue hop. That is
+  the same "which window of this app is current" guess `alignFrontmostWindow` already makes, and it
+  is exact for every single-window app.
+- **AX only refines, and only while still current.** `frontEpoch` counts front changes (activation
+  *and* our own commit — a commit invalidates every read queued for the app being left). A queued
+  read captures the epoch and is discarded on the main hop if it no longer matches.
+- **Stale for MRU ≠ useless.** A discarded answer still runs `selfHealIfUnknown`, so a focus signal
+  naming a window we never enumerated keeps triggering discovery. Dropping the whole answer would
+  have re-introduced "the window shows up only after the first Cmd+Tab" (§9).
+- **The same gate on every AX path.** `focusedWindowChanged` and `mainWindowChanged` already required
+  the owning app to be active; `applicationActivated` — a backstop duplicate of the NSWorkspace path
+  — required nothing at all. All three now go through `noteFocusedIfFrontmost`.
+
+The queue backlog itself is a separate, lesser problem: it no longer corrupts MRU, but it does delay
+window discovery. `reconcileApp` now logs any app whose AX enumeration takes over 0.5s — and that log,
+on its very first run, named the cause outright:
+
+```
+slow AX: <app> Web Content took 1.00s to enumerate windows (answered=false)   ×48 in 60 summons
+```
+
+A single culprit, and it was **not running** — absent from both `ps` and `lsappinfo`. Its observer had
+leaked: `appQuit` retires apps off the `NSWorkspace.runningApplications` KVO, and that signal never
+arrived for this WebKit helper process. Every summon then re-queried a dead pid, which answers nothing
+and so sits out the full 1s messaging timeout — on the *serial* AXQueue, delaying every real app behind it.
+That single leak was the whole backlog. `reconcileApp` now refuses to query a pid that is no longer a
+running application and tears the app down instead. The check sits at the top of `reconcileApp` (not in
+a separate sweep) so it covers the self-heal path too, and it is self-correcting: a false negative just
+re-adds the app on the next `reconcileAllApps`.

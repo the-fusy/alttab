@@ -99,19 +99,16 @@ final class AppObserver {
 
         case kAXFocusedWindowChangedNotification:
             // `element` is the newly-focused window. Only bump MRU if the OWNING app is frontmost —
-            // background apps fire focused-window-changed too (e.g. Photoshop focuses a window after
+            // background apps fire focused-window-changed too (a background app can focus a window after
             // you've already switched away), which would otherwise corrupt "current window = index 0".
             AXQueue.shared.async {
                 guard let wid = element.windowId() else { return }
                 Log.store.debug("AX focusedWindowChanged pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
-                DispatchQueue.main.async {
-                    guard NSRunningApplication(processIdentifier: pid)?.isActive == true else { return }
-                    WindowStore.shared.noteFocused(wid: wid, pid: pid)
-                }
+                DispatchQueue.main.async { WindowStore.shared.noteFocusedIfFrontmost(wid: wid, pid: pid) }
             }
 
         case kAXMainWindowChangedNotification:
-            // Switching between an app's NATIVE window-tabs (Ghostty, Terminal, Safari…) re-selects a
+            // Switching between an app's NATIVE window-tabs (terminals and browsers do this) re-selects a
             // different backing window WITHOUT an app activation (the app was already front) and, on many
             // apps, WITHOUT a focused-window-changed — only the MAIN window changes. Neither of our other
             // two MRU signals catches that, so the just-activated tab never reaches MRU-0 and the
@@ -127,14 +124,15 @@ final class AppObserver {
                       // swiftlint:disable:next force_cast
                       let wid = (m as! AXUIElement).windowId() else { return }
                 Log.store.debug("AX mainWindowChanged pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
-                DispatchQueue.main.async {
-                    guard NSRunningApplication(processIdentifier: pid)?.isActive == true else { return }
-                    WindowStore.shared.noteFocused(wid: wid, pid: pid)
-                }
+                DispatchQueue.main.async { WindowStore.shared.noteFocusedIfFrontmost(wid: wid, pid: pid) }
             }
 
         case kAXApplicationActivatedNotification:
-            // `element` is the app; read its focused window and bump that window's MRU.
+            // `element` is the app; read its focused window and bump that window's MRU. This duplicates
+            // the NSWorkspace activation path (WindowStore.noteActivated) and is kept only as a backstop
+            // for apps whose activation NSWorkspace somehow misses — so it MUST carry the same
+            // still-frontmost gate. Without it, an answer delayed by a congested AXQueue was applied
+            // unconditionally and silently re-ordered MRU (see noteActivated).
             AXQueue.shared.async {
                 var focused: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &focused) == .success,
@@ -142,7 +140,7 @@ final class AppObserver {
                 // swiftlint:disable:next force_cast
                 guard let wid = (f as! AXUIElement).windowId() else { return }
                 Log.store.debug("AX applicationActivated pid=\(pid, privacy: .public) wid=\(wid, privacy: .public)")
-                DispatchQueue.main.async { WindowStore.shared.noteFocused(wid: wid, pid: pid) }
+                DispatchQueue.main.async { WindowStore.shared.noteFocusedIfFrontmost(wid: wid, pid: pid) }
             }
 
         default:

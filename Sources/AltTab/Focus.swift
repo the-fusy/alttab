@@ -5,7 +5,7 @@
 //  Raise-and-focus the EXACT chosen window on the CURRENT Space.
 //
 //  PRIMARY path uses the private SLPS sequence (the same one the original AltTab uses), because that
-//  is what reliably fronts a SPECIFIC window of a multi-window app (two Finder/Safari windows): we
+//  is what reliably fronts a SPECIFIC window of a multi-window app (two windows of one browser): we
 //  tell the WindowServer to front the process while naming the target window id, post the synthetic
 //  "make key" event record, then AXRaise. The public-API path (kAXRaise + activate) is kept as a
 //  one-line fallback in case a future macOS breaks the SLPS record layout.
