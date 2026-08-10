@@ -54,6 +54,10 @@ final class WindowStore: NSObject {
     private var lastCommitUptime: TimeInterval = 0
     private var lastCommitFromPid: pid_t = 0
     private let selfHealDebounce: TimeInterval = 0.25
+    /// Monotonic counter of front changes (app activation, or our own commit). Any async work kicked
+    /// off by ONE front change captures its value and re-checks it on the main hop: a mismatch means
+    /// the front has moved on and the in-flight answer describes the past. See noteActivated.
+    private var frontEpoch: Int64 = 0
 
     private let myPid = getpid()
     private var appsKVO: NSKeyValueObservation?
@@ -82,12 +86,12 @@ final class WindowStore: NSObject {
             }
         }
 
-        // App activation → bump the newly-front app's focused window (event-driven MRU backbone).
+        // App activation → bump the newly-front app's window (event-driven MRU backbone).
         activateObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.bumpFocusedWindow(ofPid: app.processIdentifier)
+            self?.noteActivated(pid: app.processIdentifier)
         }
 
         for app in NSWorkspace.shared.runningApplications where isEligibleApp(app) { appLaunched(app) }
@@ -116,7 +120,11 @@ final class WindowStore: NSObject {
     }
 
     private func appQuit(_ app: NSRunningApplication) {
-        let pid = app.processIdentifier
+        tearDownApp(pid: app.processIdentifier)
+    }
+
+    /// Forget an app entirely: observer, icon, debounce state and every window it owned.
+    private func tearDownApp(pid: pid_t) {
         observers[pid]?.tearDown()
         observers[pid] = nil
         iconCache[pid] = nil
@@ -146,18 +154,7 @@ final class WindowStore: NSObject {
     /// missed window if the wid is unknown.
     func noteFocused(wid: CGWindowID, pid: pid_t = 0) {
         guard let w = byWindowId[wid] else {
-            // Focus/activation landed on a window we don't track yet: its kAXWindowCreatedNotification
-            // was missed (the per-app observer races app launch, and some apps never emit it reliably),
-            // so the ONLY thing that would discover it is a summon-time reconcile — which runs AFTER the
-            // session snapshot, leaving the window one summon behind ("shows up only after the first
-            // Cmd+Tab"). Self-heal by enumerating the owning app NOW, off this reliable focus signal —
-            // but debounce per pid: a window AltTab never tracks (ineligible subrole/size) keeps this wid
-            // unknown forever, so an un-debounced reconcile would re-fire on every focus event for it.
-            let now = ProcessInfo.processInfo.systemUptime
-            if pid > 0, now - (lastSelfHealByPid[pid] ?? 0) > selfHealDebounce {
-                lastSelfHealByPid[pid] = now
-                reconcileApp(pid: pid)
-            }
+            selfHealIfUnknown(wid: wid, pid: pid)
             return
         }
         // Only retire cold-start z-order seeding once a focus event is actually APPLIED to a tracked
@@ -173,6 +170,10 @@ final class WindowStore: NSObject {
     /// lags (our SLPS focus path fronts the window asynchronously — see Focus.swift). Passing the pid
     /// also lets the self-heal run if the committed window was momentarily dropped from the store.
     func noteCommitted(wid: CGWindowID, pid: pid_t) {
+        // A commit IS a front change, and the authoritative one: it invalidates every AX focus read
+        // still queued for the app we are leaving, whose answers would otherwise land after this bump
+        // and push a window the user never chose to MRU index 1.
+        frontEpoch &+= 1
         lastCommitUptime = ProcessInfo.processInfo.systemUptime
         // The app frontmost right now (the panel is non-activating, and Focus hasn't fronted the target
         // yet) is the app we're switching away from — the one a lagging frontmostApplication will keep
@@ -218,7 +219,7 @@ final class WindowStore: NSObject {
 
     /// Synchronously enumerate the FRONTMOST app's current-Space windows and add any we don't track yet,
     /// so a window just opened in an app that doesn't emit a reliable kAXWindowCreatedNotification
-    /// (Telegram/ChatGPT recreate their window on open, with a new wid, and their AXObserver often stays
+    /// (some apps recreate their window on open, with a new wid, and their AXObserver often stays
     /// silent) is present on the FIRST Cmd+Tab instead of a summon late. Called on the main thread at
     /// summon, right before the display snapshot.
     ///
@@ -230,7 +231,7 @@ final class WindowStore: NSObject {
     /// appears one summon late — acceptable, since the summon already has a valid target to show.
     ///
     /// Returns whether the frontmost app is definitively WINDOWLESS: its AX answered and it owns no
-    /// eligible window at all (you just closed its last one — Cmd+W in Calendar). The caller needs that
+    /// eligible window at all (you just closed its last one with Cmd+W). The caller needs that
     /// to read the snapshot correctly: "front app owns no tracked window" otherwise means "it has one we
     /// haven't enumerated yet", and the two want opposite first-press targets (see SwitcherController).
     @discardableResult
@@ -262,10 +263,10 @@ final class WindowStore: NSObject {
     }
 
     /// Synchronously drop the FRONTMOST app's ghost windows — a window it closed without the
-    /// WindowServer destroying the record (Calendar on Cmd+W) — right before the display snapshot.
+    /// WindowServer destroying the record (some apps do this on Cmd+W) — right before the display snapshot.
     ///
     /// Why this can't wait for the async reconcile: closing a window emits no reliable AX signal
-    /// (Calendar sends no kAXUIElementDestroyed), so the ghost is discovered only by the summon-time
+    /// (some apps send no kAXUIElementDestroyed), so the ghost is discovered only by the summon-time
     /// reconcileAllApps — which runs AFTER `sortedForDisplay()` froze the snapshot. The ghost would
     /// therefore be shown for one full summon after every close: exactly the "I hit Cmd+W and the app is
     /// still in the switcher, but selecting it does nothing" report.
@@ -293,7 +294,51 @@ final class WindowStore: NSObject {
         removeWindows(ghosts)
     }
 
-    private func bumpFocusedWindow(ofPid pid: pid_t) {
+    /// A focus/activation signal landed on a window we don't track yet: its kAXWindowCreatedNotification
+    /// was missed (the per-app observer races app launch, and some apps never emit it reliably), so the
+    /// ONLY thing that would discover it is a summon-time reconcile — which runs AFTER the session
+    /// snapshot, leaving the window one summon behind ("shows up only after the first Cmd+Tab"). Enumerate
+    /// the owning app NOW, off this reliable signal — but debounce per pid: a window AltTab never tracks
+    /// (ineligible subrole/size) keeps this wid unknown forever, so an un-debounced reconcile would
+    /// re-fire on every focus event for it. Touches no MRU state, which is what lets a focus answer that
+    /// is too STALE to bump (see bumpFocusedWindow) still be worth acting on for discovery.
+    private func selfHealIfUnknown(wid: CGWindowID, pid: pid_t) {
+        guard byWindowId[wid] == nil, pid > 0 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - (lastSelfHealByPid[pid] ?? 0) > selfHealDebounce else { return }
+        lastSelfHealByPid[pid] = now
+        reconcileApp(pid: pid)
+    }
+
+    /// An app just became frontmost. `NSWorkspace` delivers this synchronously on the main thread, so
+    /// the ORDER of activations is known exactly here — while the AX read that names the focused
+    /// *window* is not: it goes through the serial AXQueue, which trails the user by seconds whenever a
+    /// single unresponsive app makes every block sit out the 1s messaging timeout (see reconcileApp's
+    /// slow-AX log). Applying those answers as they trickle in re-ordered MRU behind the user's back —
+    /// a Cmd+Tab tapped seconds later landed on a window that merely happened to have the last late
+    /// bump, the "flips between the last and the one before that" report. So:
+    ///   • bump the app's most-recently-used window NOW, from the model alone — no AX, no queue hop.
+    ///     That is the same "which window of this app is current" guess alignFrontmostWindow already
+    ///     makes at summon, and it is right for every single-window app.
+    ///   • ask AX which window actually holds the focus only to REFINE that guess (multi-window apps),
+    ///     and apply the answer only while it is still current (the frontEpoch gate below).
+    func noteActivated(pid: pid_t) {
+        frontEpoch &+= 1
+        if let top = windows.filter({ $0.pid == pid }).max(by: { $0.mruStamp < $1.mruStamp }) {
+            noteFocused(wid: top.cgWindowId, pid: pid)
+        }
+        bumpFocusedWindow(ofPid: pid, epoch: frontEpoch)
+    }
+
+    /// Apply an AX-derived focus signal ONLY while the owning app is still frontmost. Background apps
+    /// fire focused/main-window-changed of their own accord, and a queued AX read can land long after
+    /// the user has moved on; either way the bump would corrupt "current window = MRU index 0".
+    func noteFocusedIfFrontmost(wid: CGWindowID, pid: pid_t) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+        noteFocused(wid: wid, pid: pid)
+    }
+
+    private func bumpFocusedWindow(ofPid pid: pid_t, epoch: Int64) {
         let appElement = AXUIElementCreateApplication(pid)
         AXQueue.shared.async {
             var focused: CFTypeRef?
@@ -301,7 +346,19 @@ final class WindowStore: NSObject {
                   let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID(),
                   // swiftlint:disable:next force_cast
                   let wid = (f as! AXUIElement).windowId() else { return }
-            DispatchQueue.main.async { self.noteFocused(wid: wid, pid: pid) }
+            DispatchQueue.main.async {
+                // Stale-answer gate. This read was started for ONE front change; if the front has moved
+                // on since (another activation, or our own commit), the answer describes the past.
+                guard self.frontEpoch == epoch else {
+                    Log.store.debug("stale focus bump dropped: pid=\(pid, privacy: .public) wid=\(wid, privacy: .public) epoch \(epoch, privacy: .public) ≠ \(self.frontEpoch, privacy: .public)")
+                    // Stale for MRU purposes, still valid as DISCOVERY: the window it names may be one we
+                    // never enumerated, and noteFocused's self-heal is what normally finds those. Dropping
+                    // the whole answer would leave such a window to be found a summon later.
+                    self.selfHealIfUnknown(wid: wid, pid: pid)
+                    return
+                }
+                self.noteFocused(wid: wid, pid: pid)
+            }
         }
     }
 
@@ -401,8 +458,23 @@ final class WindowStore: NSObject {
     }
 
     private func reconcileApp(pid: pid_t, existence: ExistenceSnapshot? = nil) {
+        // Never query a pid that is no longer a running application. `appQuit` normally retires those off
+        // NSWorkspace's runningApplications KVO, but that signal is NOT guaranteed for everything we
+        // track: MEASURED, a third-party app's WebKit helper process disappeared without one and left
+        // its observer behind, so every summon re-queried a dead pid — which answers nothing and
+        // therefore sits out the FULL 1s AX messaging timeout on the SERIAL AXQueue, delaying every real
+        // app queued behind it (48 such stalls in a 60-summon session; see the slow-AX log below). The
+        // check lives here rather than in a separate sweep so it also covers the self-heal path, and it
+        // is self-correcting: a false negative just re-adds the app on the next reconcileAllApps.
+        guard let app = NSRunningApplication(processIdentifier: pid) else {
+            if observers[pid] != nil {
+                Log.store.log("dropping observer for pid \(pid, privacy: .public) — no longer a running application (no NSWorkspace quit signal arrived)")
+            }
+            tearDownApp(pid: pid)
+            return
+        }
         let appElement = AXUIElementCreateApplication(pid)
-        let appName = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
+        let appName = app.localizedName ?? ""
         // Snapshot the app's tracked wids HERE (still on the main thread, before the AXQueue hop) so the
         // ordered-out classification below runs entirely off-main. Stale-by-the-time-we-apply is fine:
         // applyReconcile re-derives `absent` from the live store and only intersects it with this set.
@@ -412,10 +484,19 @@ final class WindowStore: NSObject {
             let onscreen = existence?.onscreen ?? Self.onscreenWindowIds()
             let currentSpaces = existence?.currentSpaces ?? Self.spaces(of: Array(onscreen))
             // Enumerate FIRST: whether the app's AX answered gates the no-Space cull below.
+            let axStart = ProcessInfo.processInfo.systemUptime
             let (elements, axAnswered) = appElement.currentSpaceWindows()
+            // AXQueue is serial: one app that answers slowly (or not at all — the global messaging
+            // timeout is 1s) delays every block behind it, and a summon enqueues one block per app. That
+            // backlog no longer corrupts MRU (bumps are gated on frontEpoch), but it does delay window
+            // discovery — so name the culprit instead of leaving it to be inferred from timestamps.
+            let axElapsed = ProcessInfo.processInfo.systemUptime - axStart
+            if axElapsed > 0.5 {
+                Log.store.log("slow AX: \(appName, privacy: .public) [pid \(pid, privacy: .public)] took \(String(format: "%.2f", axElapsed), privacy: .public)s to enumerate windows (answered=\(axAnswered, privacy: .public)) — stalls the serial AXQueue")
+            }
             // Ghost cull. An app that closes a window without destroying its WindowServer record leaves a
-            // tracked window that the plain existence oracle never drops (Calendar does exactly this on
-            // Cmd+W; so does an AX-DEAD app like a backgrounded ChatGPT, whose kAXWindows returns
+            // tracked window that the plain existence oracle never drops (a stock macOS app does exactly this on
+            // Cmd+W; so does an AX-DEAD app like a backgrounded Electron-style one, whose kAXWindows returns
             // kAXErrorCannotComplete so ALL its windows look "absent from the current Space"). Two ghost
             // signatures, both requiring the window to NOT be ordered on-screen:
             //   • assigned to the CURRENT Space (spaces ⊆ currentSpaces, non-empty) — ordered out where we
@@ -472,7 +553,7 @@ final class WindowStore: NSObject {
         // dropping them used to gut the model and erase MRU history whenever a summon happened on
         // another Space. A tracked window is dead when the WindowServer no longer lists it at all
         // (`gone`), or when it is still listed but carries a ghost signature: ordered out on the CURRENT
-        // Space (`orderedOut`), or on NO Space at all with the app's AX answering (`noSpace` — Calendar's
+        // Space (`orderedOut`), or on NO Space at all with the app's AX answering (`noSpace` — the
         // closed-but-not-destroyed window; see reconcileApp). With no existence info (CG failure) we drop
         // nothing and rely on kAXUIElementDestroyed; with no Space info both ghost sets are nil and only
         // the `gone` rule fires.

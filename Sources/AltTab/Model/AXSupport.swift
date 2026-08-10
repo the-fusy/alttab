@@ -65,7 +65,7 @@ extension AXUIElement {
     /// WHETHER kAXWindows ANSWERED at all. We deliberately do NOT brute-force other-Space windows
     /// (AXUIElement.swift:153-176 DROPPED).
     ///
-    /// `answered` is a liveness gate, not a detail: an app whose AX is dead (a backgrounded ChatGPT
+    /// `answered` is a liveness gate, not a detail: an app whose AX is dead (a backgrounded Electron-style app
     /// returns kAXErrorCannotComplete) enumerates as ZERO windows and is otherwise indistinguishable
     /// from an app that genuinely closed all of them. Only when the app ANSWERED does "not in
     /// kAXWindows" carry information — see WindowStore.reconcileApp's ghost cull.

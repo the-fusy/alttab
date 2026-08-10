@@ -68,12 +68,12 @@ final class SwitcherController: SwitcherSessionControlling {
     // MARK: - Session lifecycle
 
     private func begin(forward: Bool) {
-        // A window just opened in an app with unreliable AX (Telegram/ChatGPT recreate their window on
+        // A window just opened in an app with unreliable AX (some apps recreate their window on
         // open and stay silent on kAXWindowCreatedNotification) is discovered only by the async summon
         // reconcile — one summon too late ("missing on the first Cmd+Tab"). Since the frontmost app is
         // active (⇒ AX responds), synchronously pull its windows into the model NOW, before we snapshot.
         // The mirror image: an app that CLOSED a window may leave it in our model, because closing emits
-        // no reliable AX signal (Calendar sends no destroyed-notification) and the summon reconcile lands
+        // no reliable AX signal (some apps send no destroyed-notification) and the summon reconcile lands
         // after this snapshot. Drop those ghosts FIRST — before ensureFrontmostAppTracked (whose gate is
         // "the front app owns no tracked window", which a ghost would falsely satisfy) and before
         // alignFrontmostWindow (which would otherwise realign the ghost to MRU-0).
