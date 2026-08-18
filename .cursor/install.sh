@@ -46,7 +46,9 @@ install_swift() {
 
   # shellcheck disable=SC1091
   . "$SWIFTLY_HOME/env.sh"
-  swiftly install --use "$SWIFT_VERSION"
+  # Run from $HOME so swiftly's `--use` writes its `.swift-version` marker there
+  # instead of polluting the checked-out repo working directory (/workspace).
+  ( cd "$HOME" && swiftly install --use "$SWIFT_VERSION" )
 }
 
 # 1. Install the toolchain only when the exact version is missing (idempotent).
