@@ -1,0 +1,8 @@
+{
+  "name": "AltTab (Swift 6.3.3 Linux tooling)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "user": "ubuntu",
+  "install": "swift package resolve"
+}
