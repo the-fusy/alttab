@@ -63,7 +63,7 @@ thumbnails, RTL handling, Liquid Glass, and the big settings window.
 | T1 🔁 | **AppKit, no SwiftUI** for the switcher | The switcher must appear instantly and never animate implicitly; raw `NSPanel`/`NSView`/`CALayer` is what alt-tab uses and what gives precise, fast control. |
 | T2 🔁 | **SwiftPM executable + a bundling/codesign script** (no `.xcodeproj` to hand-maintain, no npm/Python) | Fully CLI-buildable and reproducible; `swift build` + one script produces and signs `AltTab.app`. Keeps the repo plain-text and reviewable — the opposite of bloat. |
 | T3 🔁 | **Swift language mode v5** | Avoids the Swift 6 strict-concurrency compile wall for AppKit code that legitimately uses background run-loop threads for Accessibility IPC and the event tap. |
-| T4 ✅ | **All private APIs isolated in one file** (`PrivateAPIs.swift`) | When a macOS update breaks a private symbol, the blast radius is one file. Live private surface: 5 symbols (see T9). |
+| T4 ✅ | **All private APIs isolated in one file** (`PrivateAPIs.swift`) | When a macOS update breaks a private symbol, the blast radius is one file. Live private surface: 7 linked SkyLight/AX symbols (see T9) plus a runtime-only Icon Services path (`IconServicesSPI`) that is not linked and falls back to public `app.icon` flattening. |
 | T5 🔁 | **Apps via `NSWorkspace.runningApplications` + KVO**; **windows via per-app Accessibility** (`AXUIElementCreateApplication` → `kAXWindowsAttribute`) | `kAXWindowsAttribute` can only *enumerate* current-Space windows; we still avoid the brute-force `_AXUIElementCreateWithRemoteToken` trick. Cross-Space coverage comes from remembering windows once seen (P6), with `CGWindowList` (all Spaces) as the liveness oracle — kAXWindows absence means "other Space", not "closed". |
 | T6 ✅ | **Window identity = `CGWindowID`** via private `_AXUIElementGetWindow` | Stable identity across AX re-fetches; one tiny, very stable private call. |
 | T7 ✅ | **MRU = monotonic counter per window**, bumped on `kAXApplicationActivatedNotification` / `kAXFocusedWindowChangedNotification` / `kAXMainWindowChangedNotification` | Simpler than and equivalent to alt-tab's dense-rank rotation. Sort descending at show time. **`kAXMainWindowChangedNotification` is required** for native window-tab switches (terminals, browsers): selecting another tab re-points the app's *main* window with no app-activation and often no focused-window-changed, so without it the just-used tab never reaches MRU-0 and Cmd+Tab lands on the previously-used tab. We read the app's `kAXMainWindow` and bump it, gated on the app being frontmost (same index-0 invariant as the focused-window path). |
@@ -178,6 +178,13 @@ After the first real run, the following were decided and applied:
   tabs?" / running-process dialogs). If one appears, the panel steps aside and the
   window is fronted via `Focus.focus` so the user actually sees and answers the dialog,
   instead of it being stranded in the background with the tile already gone.
+- **Tahoe Liquid Glass icon rim stripped at cache time.** `NSRunningApplication.icon` is now an
+  HDR (extended sRGB) Icon Services render sitting on a translucent chiclet — the specular
+  rim blooms on the sides of every tile. `WindowStore.cacheIcon` asks Icon Services (runtime
+  SPI, isolated in `PrivateAPIs.IconServicesSPI`) for the unmasked asset and flattens it to
+  8-bit sRGB; the tile's `NSImageView` is non-vibrant and locked to `.standard` dynamic range
+  so the HUD cannot re-apply a glass edge. If the SPI disappears we still flatten `app.icon`
+  and live with the plate. Matches the existing "no Liquid Glass" product cut vs alt-tab-macos.
 - **App icon added** (`Resources/AltTab.icns`, wired via `CFBundleIconFile`): a blue
   squircle with two overlapping window cards, drawn programmatically (CoreGraphics) at
   all sizes — no asset catalog, no external tooling. The menu-bar item keeps its
