@@ -7,7 +7,8 @@
 //  (fine for our Developer-ID + notarized distribution) and have been stable on macOS 13/14/15 on
 //  Apple Silicon.
 //
-//  Seven symbols, in three groups:
+//  Seven linked symbols, in three groups, plus one runtime-only Icon Services path (no new
+//  link-time symbol — selectors resolved via the ObjC runtime, public fallback if they vanish):
 //
 //   identity / hotkey (always used):
 //    1. _AXUIElementGetWindow        — AX window element → CGWindowID (our stable identity key).
@@ -23,6 +24,11 @@
 //    7. CGSCopySpacesForWindows      — which Spaces host given windows; distinguishes a real
 //                                      other-Space window (keep) from an ordered-out ghost an
 //                                      AX-dead app leaves in the WindowServer list (drop).
+//
+//   icon raster (WindowStore.cacheIcon):
+//    ISImageDescriptor + ISIcon.CGImageForImageDescriptor: — Tahoe wraps every app.icon in a
+//    Liquid Glass chiclet (HDR specular rim). We ask for the unmasked asset; if the SPI is
+//    gone we just flatten app.icon to sRGB and live with the plate.
 //
 //  Why (3)–(5): raising a SPECIFIC window of a multi-window app is exactly what a window switcher must
 //  do, and there is no robust PUBLIC API for it (NSRunningApplication.activate fronts the app's main
@@ -42,6 +48,7 @@
 
 import Cocoa
 import ApplicationServices
+import ObjectiveC
 
 // MARK: - AX → CGWindowID (PRIVATE; ApplicationServices.HIServices)
 
@@ -93,3 +100,45 @@ func _CGSDefaultConnection() -> Int32
 /// window is on NO Space, i.e. a WindowServer ghost). Used only as a liveness tiebreaker in reconcile.
 @_silgen_name("CGSCopySpacesForWindows")
 func CGSCopySpacesForWindows(_ cid: Int32, _ mask: Int32, _ windowIDs: CFArray) -> CFArray?
+
+// MARK: - Unmasked app icon (PRIVATE; IconServices, runtime only)
+
+/// Tahoe Icon Services wrap `NSRunningApplication.icon` in a Liquid Glass chiclet whose
+/// specular rim is HDR (extended sRGB, values > 1.0) and blooms on the sides of the tile.
+/// Ask for the same ISIcon without the mask. Returns nil if the runtime classes/selectors
+/// are missing — caller then flattens `app.icon` via the public CGImage path.
+enum IconServicesSPI {
+    static func unmaskedCGImage(from image: NSImage,
+                                pointSize: CGFloat = 128,
+                                scale: CGFloat = 2) -> CGImage? {
+        guard let rep = image.representations.first as NSObject?,
+              let isIcon = objc_getAssociatedIcon(rep) else { return nil }
+        guard let Desc = NSClassFromString("ISImageDescriptor") as? NSObject.Type,
+              let allocUM = Desc.perform(NSSelectorFromString("alloc"))
+        else { return nil }
+        let alloc = allocUM.takeRetainedValue() as! NSObject
+        let initSel = NSSelectorFromString("initWithSize:scale:")
+        guard alloc.responds(to: initSel) else { return nil }
+        typealias InitFn = @convention(c) (AnyObject, Selector, CGSize, CGFloat) -> Unmanaged<NSObject>
+        // init consumes the +1 from alloc.
+        let desc = unsafeBitCast(alloc.method(for: initSel), to: InitFn.self)(
+            alloc, initSel, CGSize(width: pointSize, height: pointSize), scale
+        ).takeUnretainedValue()
+        let maskSel = NSSelectorFromString("setShouldApplyMask:")
+        if desc.responds(to: maskSel) {
+            typealias SetBool = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(desc.method(for: maskSel), to: SetBool.self)(desc, maskSel, false)
+        }
+        let cgSel = NSSelectorFromString("CGImageForImageDescriptor:")
+        guard isIcon.responds(to: cgSel) else { return nil }
+        typealias CGFn = @convention(c) (AnyObject, Selector, AnyObject) -> Unmanaged<CGImage>?
+        return unsafeBitCast(isIcon.method(for: cgSel), to: CGFn.self)(isIcon, cgSel, desc)?
+            .takeUnretainedValue()
+    }
+
+    /// NSISIconImageRep stores the ISIcon in `_icon` and has no public getter.
+    private static func objc_getAssociatedIcon(_ rep: NSObject) -> NSObject? {
+        guard let ivar = class_getInstanceVariable(object_getClass(rep), "_icon") else { return nil }
+        return object_getIvar(rep, ivar) as? NSObject
+    }
+}

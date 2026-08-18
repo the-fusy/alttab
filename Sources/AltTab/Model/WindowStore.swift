@@ -137,14 +137,41 @@ final class WindowStore: NSObject {
         guard iconCache[pid] == nil else { return }
         let nsIcon = app.icon
         AXQueue.shared.async {
-            var proposed = CGRect(x: 0, y: 0, width: 128, height: 128)
-            let cg = nsIcon?.cgImage(forProposedRect: &proposed, context: nil, hints: nil)
+            let cg = Self.rasterizeIcon(nsIcon)
             DispatchQueue.main.async {
                 guard let cg else { return }
                 self.iconCache[pid] = cg
                 for w in self.windows where w.pid == pid && w.icon == nil { w.icon = cg }
             }
         }
+    }
+
+    /// Tahoe's `app.icon` is an HDR Liquid Glass render (extended sRGB, specular > 1.0) sitting
+    /// on a translucent chiclet — that rim blooms on the sides of the tile. Prefer the unmasked
+    /// Icon Services asset, then flatten to 8-bit sRGB so NSImageView cannot re-bloom it.
+    private static func rasterizeIcon(_ image: NSImage?) -> CGImage? {
+        guard let image else { return nil }
+        if let unmasked = IconServicesSPI.unmaskedCGImage(from: image) {
+            return flattenToSRGB(unmasked) ?? unmasked
+        }
+        return flattenNSImage(image)
+    }
+
+    private static func flattenToSRGB(_ cg: CGImage, pixelSize: Int = 256) -> CGImage? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: pixelSize, height: pixelSize,
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
+        return ctx.makeImage()
+    }
+
+    private static func flattenNSImage(_ image: NSImage, pixelSize: Int = 256) -> CGImage? {
+        var proposed = CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize)
+        guard let src = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }
+        return flattenToSRGB(src) ?? src
     }
 
     // MARK: - MRU

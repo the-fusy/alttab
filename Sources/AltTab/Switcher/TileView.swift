@@ -22,7 +22,7 @@ final class TileView: NSView {
 
     var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
 
-    private let iconView = NSImageView()
+    private let iconView = FlatIconView()
     private let closeButton = NSButton()
     private var tracking: NSTrackingArea?
 
@@ -34,8 +34,11 @@ final class TileView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: cell, height: cell))
         wantsLayer = true
 
-        // Icon, centered in the cell.
+        // Icon, centered in the cell. SDR + no vibrancy so Tahoe cannot re-apply a glass rim.
         iconView.imageScaling = .scaleProportionallyUpOrDown
+        if #available(macOS 14.0, *) {
+            iconView.preferredImageDynamicRange = .standard
+        }
         if let cg = window.icon {
             iconView.image = NSImage(cgImage: cg, size: NSSize(width: iconSize, height: iconSize))
         }
@@ -101,4 +104,10 @@ final class TileView: NSView {
     @objc private func closeClicked() {
         onClose?(index)
     }
+}
+
+/// NSImageView inside the HUD visual-effect view would otherwise pick up Liquid Glass vibrancy
+/// on the icon's anti-aliased edge — a second source of the side glow, on top of the HDR chiclet.
+private final class FlatIconView: NSImageView {
+    override var allowsVibrancy: Bool { false }
 }
