@@ -147,14 +147,40 @@ final class WindowStore: NSObject {
     }
 
     /// Tahoe's `app.icon` is an HDR Liquid Glass render (extended sRGB, specular > 1.0) sitting
-    /// on a translucent chiclet — that rim blooms on the sides of the tile. Prefer the unmasked
-    /// Icon Services asset, then flatten to 8-bit sRGB so NSImageView cannot re-bloom it.
+    /// on a translucent chiclet — that rim blooms on the sides of the tile. Flatten to 8-bit sRGB
+    /// so NSImageView cannot re-bloom it. The Icon Services unmask SPI is best-effort: it returns
+    /// the dashed generic placeholder when that size isn't cached yet, so we only keep it when the
+    /// raster actually has pixels (and we force the public path first, which waits for a real asset).
     private static func rasterizeIcon(_ image: NSImage?) -> CGImage? {
         guard let image else { return nil }
-        if let unmasked = IconServicesSPI.unmaskedCGImage(from: image) {
-            return flattenToSRGB(unmasked) ?? unmasked
+        let publicFlat = flattenNSImage(image)
+        if let unmasked = IconServicesSPI.unmaskedCGImage(from: image),
+           let spiFlat = flattenToSRGB(unmasked),
+           opaqueCoverage(spiFlat) >= 0.20 {
+            return spiFlat
         }
-        return flattenNSImage(image)
+        return publicFlat
+    }
+
+    /// Fraction of pixels with non-trivial alpha, on a 32×32 downsample. Used to reject the Icon
+    /// Services dashed placeholder (~0.05 coverage) without holding a bitmap of the placeholder.
+    private static func opaqueCoverage(_ cg: CGImage) -> Double {
+        let n = 32
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: n, height: n,
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return 0 }
+        ctx.clear(CGRect(x: 0, y: 0, width: n, height: n))
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+        let stride = ctx.bytesPerRow
+        let buf = data.bindMemory(to: UInt8.self, capacity: stride * n)
+        var opaque = 0
+        for y in 0..<n {
+            let row = y * stride
+            for x in 0..<n where buf[row + x * 4 + 3] > 24 { opaque += 1 }
+        }
+        return Double(opaque) / Double(n * n)
     }
 
     private static func flattenToSRGB(_ cg: CGImage, pixelSize: Int = 256) -> CGImage? {

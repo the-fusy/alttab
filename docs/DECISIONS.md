@@ -180,11 +180,13 @@ After the first real run, the following were decided and applied:
   instead of it being stranded in the background with the tile already gone.
 - **Tahoe Liquid Glass icon rim stripped at cache time.** `NSRunningApplication.icon` is now an
   HDR (extended sRGB) Icon Services render sitting on a translucent chiclet — the specular
-  rim blooms on the sides of every tile. `WindowStore.cacheIcon` asks Icon Services (runtime
-  SPI, isolated in `PrivateAPIs.IconServicesSPI`) for the unmasked asset and flattens it to
-  8-bit sRGB; the tile's `NSImageView` is non-vibrant and locked to `.standard` dynamic range
-  so the HUD cannot re-apply a glass edge. If the SPI disappears we still flatten `app.icon`
-  and live with the plate. Matches the existing "no Liquid Glass" product cut vs alt-tab-macos.
+  rim blooms on the sides of every tile. `WindowStore.cacheIcon` flattens `app.icon` to 8-bit
+  sRGB (this is what kills the bloom) and may substitute an unmasked Icon Services raster
+  (`PrivateAPIs.IconServicesSPI`) when that raster actually has pixels. The SPI does **not**
+  wait: an uncached size comes back as the dashed generic placeholder, which we used to cache
+  for the life of the pid (Android Studio / other cold icons looking empty). Reject any SPI
+  raster under 20% opaque coverage and keep the public flatten. The tile's `NSImageView` is
+  non-vibrant and locked to `.standard` dynamic range so the HUD cannot re-apply a glass edge.
 - **App icon added** (`Resources/AltTab.icns`, wired via `CFBundleIconFile`): a blue
   squircle with two overlapping window cards, drawn programmatically (CoreGraphics) at
   all sizes — no asset catalog, no external tooling. The menu-bar item keeps its
