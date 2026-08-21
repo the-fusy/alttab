@@ -27,8 +27,8 @@
 //
 //   icon raster (WindowStore.cacheIcon):
 //    ISImageDescriptor + ISIcon.CGImageForImageDescriptor: — Tahoe wraps every app.icon in a
-//    Liquid Glass chiclet (HDR specular rim). We ask for the unmasked asset; if the SPI is
-//    gone we just flatten app.icon to sRGB and live with the plate.
+//    Liquid Glass chiclet (HDR specular rim). Best-effort unmasked raster; if the size isn't
+//    cached the SPI returns a dashed placeholder (not nil) — caller must reject it.
 //
 //  Why (3)–(5): raising a SPECIFIC window of a multi-window app is exactly what a window switcher must
 //  do, and there is no robust PUBLIC API for it (NSRunningApplication.activate fronts the app's main
@@ -107,6 +107,10 @@ func CGSCopySpacesForWindows(_ cid: Int32, _ mask: Int32, _ windowIDs: CFArray) 
 /// specular rim is HDR (extended sRGB, values > 1.0) and blooms on the sides of the tile.
 /// Ask for the same ISIcon without the mask. Returns nil if the runtime classes/selectors
 /// are missing — caller then flattens `app.icon` via the public CGImage path.
+///
+/// `CGImageForImageDescriptor:` does NOT wait: if that size isn't in the Icon Services
+/// cache yet, it returns the dashed generic placeholder (a hollow squircle, ~5% coverage)
+/// instead of nil. The caller must reject that raster; see `WindowStore.rasterizeIcon`.
 enum IconServicesSPI {
     static func unmaskedCGImage(from image: NSImage,
                                 pointSize: CGFloat = 128,
